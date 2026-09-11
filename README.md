@@ -57,7 +57,7 @@ python -m bot
 ```
 
 Then in Discord: `/fight fighter_a:… fighter_b:… context:…` (context optional).  
-Use the **Challenge** button on a ruling to submit new evidence; the court re-judges with the prior verdict plus your challenge (last verdict stored per channel in memory).
+Use the **Challenge** button on a ruling to submit new evidence; the court re-judges with the prior verdict plus your challenge (last verdict stored per ruling message id in memory).
 
 ## House rules
 

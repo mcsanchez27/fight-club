@@ -12,8 +12,18 @@ from discord.ext import commands
 from bot.embeds import verdict_embed
 from bot.judge import judge
 
-# last verdict per channel id (in-memory only)
+# last verdict per ruling message id (in-memory only)
 _last_verdict: dict[int, dict[str, Any]] = {}
+
+
+def store_ruling(message_id: int, verdict: dict[str, Any]) -> None:
+    """Associate a verdict with the Discord message that displayed it."""
+    _last_verdict[message_id] = verdict
+
+
+def get_ruling(message_id: int) -> dict[str, Any] | None:
+    """Look up the verdict for a ruling message, if still in memory."""
+    return _last_verdict.get(message_id)
 
 
 class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
@@ -47,13 +57,12 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
         except Exception as e:
             await interaction.followup.send(f"Re-judge failed: {e}", ephemeral=True)
             return
-        if interaction.channel_id is not None:
-            _last_verdict[interaction.channel_id] = verdict
-        await interaction.followup.send(
+        msg = await interaction.followup.send(
             content="⚖ Court revises on challenge:",
             embed=verdict_embed(verdict),
             view=ChallengeView(),
         )
+        store_ruling(msg.id, verdict)
 
 
 class ChallengeView(discord.ui.View):
@@ -68,11 +77,11 @@ class ChallengeView(discord.ui.View):
     async def challenge(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        channel_id = interaction.channel_id
-        prior = _last_verdict.get(channel_id) if channel_id is not None else None
+        message = interaction.message
+        prior = get_ruling(message.id) if message is not None else None
         if not prior:
             await interaction.response.send_message(
-                "No ruling in this channel to challenge. Run `/fight` first.",
+                "No ruling attached to this message to challenge. Run `/fight` first.",
                 ephemeral=True,
             )
             return
@@ -102,9 +111,10 @@ class FightCog(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"Judgment failed: {e}", ephemeral=True)
             return
-        if interaction.channel_id is not None:
-            _last_verdict[interaction.channel_id] = verdict
-        await interaction.followup.send(embed=verdict_embed(verdict), view=ChallengeView())
+        msg = await interaction.followup.send(
+            embed=verdict_embed(verdict), view=ChallengeView()
+        )
+        store_ruling(msg.id, verdict)
 
 
 async def setup(bot: commands.Bot) -> None:

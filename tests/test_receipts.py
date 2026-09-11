@@ -246,3 +246,19 @@ def test_apply_merges_packed_receipts() -> None:
     assert out["confidence"] == 9.0
     assert any(c.get("claim") == "wiki claim" for c in out["citations"])
     assert out["voided"] is False
+
+
+def test_stale_receipt_unverified() -> None:
+    from bot.judge import normalize_citation
+
+    c = normalize_citation(
+        {
+            "claim": "old claim",
+            "snippet": "old snippet words here",
+            "verified": True,
+            "retrieved_at": "2020-01-01T00:00:00Z",
+            "kind": "receipt",
+        }
+    )
+    assert c["verified"] is False
+    assert c.get("stale") is True

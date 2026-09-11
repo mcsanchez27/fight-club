@@ -8,7 +8,7 @@ from typing import Any
 
 from bot.laws import get_laws
 from bot.retrieval import RetrievalResult, pack_retrieval_for_prompt, retrieve
-from bot.sources import cap_snippet
+from bot.sources import cap_snippet, is_stale
 
 # Schema field order is intentional: steelman / concede / unknowns before the ruling.
 VERDICT_REQUIRED_FIELDS = (
@@ -187,6 +187,9 @@ def normalize_citation(item: Any) -> dict[str, Any]:
         }
         if not out["claim"]:
             out["claim"] = out["snippet"] or out["locator"] or "citation"
+        if out.get("verified") and is_stale(out.get("retrieved_at") or None):
+            out["verified"] = False
+            out["stale"] = True
         return out
     return {
         "claim": str(item),

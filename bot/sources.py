@@ -155,3 +155,20 @@ def url_allowed(url: str, franchise_key: str | None, cfg: dict[str, Any] | None 
         if bhost and (host == bhost or host.endswith("." + bhost)):
             return True
     return False
+
+
+def is_stale(retrieved_at: str | None, cfg: dict[str, Any] | None = None) -> bool:
+    """True if retrieved_at is older than stale_days (default 90)."""
+    if not retrieved_at:
+        return False
+    from datetime import datetime, timezone, timedelta
+
+    raw = retrieved_at.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+    return age > timedelta(days=stale_days(cfg))

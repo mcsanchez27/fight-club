@@ -66,7 +66,7 @@ Use the **Challenge** button on a ruling to submit new evidence; the court re-ju
 3. Canon citations beat vibes; "I don't know that material" is a legal plea, not a loss  
 4. Rulings with confidence X/10, revisable on new evidence  
 5. Traps are legal  
-6. Transparent confidence beats fake neutrality  
+6. The migraine gets the final say. Court recesses whenever the King calls it  
 
 ## Layout
 

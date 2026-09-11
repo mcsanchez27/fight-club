@@ -6,6 +6,19 @@ import json
 import os
 from typing import Any
 
+# Schema field order is intentional: steelman / concede / unknowns before the ruling.
+VERDICT_REQUIRED_FIELDS = (
+    "matchup",
+    "steelman_a",
+    "steelman_b",
+    "concessions",
+    "unknowns",
+    "ruling",
+    "winner",
+    "confidence",
+    "citations",
+)
+
 SYSTEM_PROMPT = """\
 You are Fight Club Court — a sharp analytical debate judge for fiction and \
 death-battle matchups. You price logistics, character flaws, and win conditions, \
@@ -18,19 +31,20 @@ HOUSE RULES
 not a loss; put unknowns in the unknowns list.
 4. Rulings carry confidence X/10 and are revisable on new evidence.
 5. Traps are legal — clever setup, environment abuse, and prep are valid.
-6. Transparent confidence beats fake neutrality — state your lean clearly.
+6. The migraine gets the final say. Court recesses whenever the King calls it.
 
-Respond with ONLY a single JSON object matching this schema (no markdown fences):
+Respond with ONLY a single JSON object matching this schema (no markdown fences).
+Build fields in this order — steelman and concessions before you lock a winner:
 {
   "matchup": string,
-  "winner": string,
-  "confidence": number 0-10,
-  "ruling": string (2-4 sentences),
   "steelman_a": string,
   "steelman_b": string,
-  "citations": [string],
   "concessions": [string],
-  "unknowns": [string]
+  "unknowns": [string],
+  "ruling": string (2-4 sentences),
+  "winner": string,
+  "confidence": number 0-10,
+  "citations": [string]
 }
 """
 
@@ -45,18 +59,7 @@ def _parse_verdict(raw: str) -> dict[str, Any]:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     data = json.loads(text)
-    required = (
-        "matchup",
-        "winner",
-        "confidence",
-        "ruling",
-        "steelman_a",
-        "steelman_b",
-        "citations",
-        "concessions",
-        "unknowns",
-    )
-    for key in required:
+    for key in VERDICT_REQUIRED_FIELDS:
         if key not in data:
             raise ValueError(f"Verdict missing required field: {key}")
     data["confidence"] = float(data["confidence"])
@@ -64,6 +67,21 @@ def _parse_verdict(raw: str) -> dict[str, Any]:
         if not isinstance(data[list_key], list):
             data[list_key] = [str(data[list_key])]
     return data
+
+
+def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize a verdict dict (no code-fence stripping)."""
+    if not isinstance(data, dict):
+        raise ValueError("Verdict must be a dict")
+    for key in VERDICT_REQUIRED_FIELDS:
+        if key not in data:
+            raise ValueError(f"Verdict missing required field: {key}")
+    out = dict(data)
+    out["confidence"] = float(out["confidence"])
+    for list_key in ("citations", "concessions", "unknowns"):
+        if not isinstance(out[list_key], list):
+            out[list_key] = [str(out[list_key])]
+    return out
 
 
 def _judge_anthropic(user_msg: str) -> dict[str, Any]:
@@ -151,24 +169,28 @@ def judge(
 
 
 def format_verdict_text(v: dict[str, Any]) -> str:
-    """Plain-text CLI rendering of a verdict."""
+    """Plain-text CLI rendering of a verdict (steelman-first)."""
     lines = [
         f"Matchup:  {v['matchup']}",
-        f"Winner:   {v['winner']}",
-        f"Confidence: {v['confidence']}/10",
-        "",
-        f"Ruling: {v['ruling']}",
         "",
         f"Steelman A: {v['steelman_a']}",
         f"Steelman B: {v['steelman_b']}",
     ]
-    if v.get("citations"):
-        lines.append("\nCitations:")
-        lines.extend(f"  - {c}" for c in v["citations"])
     if v.get("concessions"):
         lines.append("\nConcessions:")
         lines.extend(f"  - {c}" for c in v["concessions"])
     if v.get("unknowns"):
         lines.append("\nUnknowns:")
         lines.extend(f"  - {u}" for u in v["unknowns"])
+    lines.extend(
+        [
+            "",
+            f"Ruling: {v['ruling']}",
+            f"Winner:   {v['winner']}",
+            f"Confidence: {v['confidence']}/10",
+        ]
+    )
+    if v.get("citations"):
+        lines.append("\nCitations:")
+        lines.extend(f"  - {c}" for c in v["citations"])
     return "\n".join(lines)

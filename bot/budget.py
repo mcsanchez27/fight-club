@@ -1,0 +1,101 @@
+"""Monthly USD cap + per-ruling token ceiling estimates."""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+
+from bot.db import CourtDB, get_db
+
+
+def monthly_usd_cap() -> float:
+    return float(os.getenv("FIGHT_MONTHLY_USD_CAP", "20"))
+
+
+def token_ceiling() -> int:
+    """Max estimated tokens (in+out) per ruling before hard stop."""
+    return int(os.getenv("FIGHT_TOKEN_CEILING", "16000"))
+
+
+def input_usd_per_mtok() -> float:
+    return float(os.getenv("FIGHT_USD_PER_MTOK_INPUT", "3.0"))
+
+
+def output_usd_per_mtok() -> float:
+    return float(os.getenv("FIGHT_USD_PER_MTOK_OUTPUT", "15.0"))
+
+
+def current_month() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars/token)."""
+    return max(1, len(text or "") // 4)
+
+
+def estimate_usd(tokens_in: int, tokens_out: int) -> float:
+    return (tokens_in / 1_000_000.0) * input_usd_per_mtok() + (
+        tokens_out / 1_000_000.0
+    ) * output_usd_per_mtok()
+
+
+def estimate_ruling_cost_usd(*, with_retrieval: bool = True) -> float:
+    """Design-doc style ballpark used for pre-flight checks.
+
+    Phase-2 baseline ~2.5k in + 1k out; retrieval ~doubles input.
+    """
+    tin = 5000 if with_retrieval else 2500
+    tout = 1000
+    return estimate_usd(tin, tout)
+
+
+def check_budget(db: CourtDB | None = None) -> str | None:
+    """Return ephemeral rejection if monthly cap or token ceiling would be breached."""
+    db = db or get_db()
+    cap = monthly_usd_cap()
+    if cap > 0:
+        spent = db.month_spend_usd(current_month())
+        est = estimate_ruling_cost_usd(with_retrieval=True)
+        if spent + est > cap:
+            return (
+                f"Monthly Fight Club spend cap reached "
+                f"(${spent:.2f} of ${cap:.2f}). Court recesses until next month."
+            )
+    ceiling = token_ceiling()
+    # Pre-flight uses the design estimate; hard ceiling blocks oversized packs later too
+    est_tokens = 5000 + 1000
+    if ceiling > 0 and est_tokens > ceiling:
+        return (
+            f"Per-ruling token ceiling ({ceiling}) is below the estimated "
+            f"judge pack ({est_tokens}). Raise FIGHT_TOKEN_CEILING or disable retrieval."
+        )
+    return None
+
+
+def assert_token_pack(prompt_tokens: int, max_out: int = 2048) -> str | None:
+    ceiling = token_ceiling()
+    total = prompt_tokens + max_out
+    if ceiling > 0 and total > ceiling:
+        return (
+            f"This ruling's estimated tokens ({total}) exceed "
+            f"FIGHT_TOKEN_CEILING ({ceiling})."
+        )
+    return None
+
+
+def record_estimated_usage(
+    *,
+    tokens_in: int,
+    tokens_out: int,
+    db: CourtDB | None = None,
+) -> float:
+    db = db or get_db()
+    usd = estimate_usd(tokens_in, tokens_out)
+    db.record_usage(
+        month=current_month(),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        estimated_usd=usd,
+    )
+    return usd

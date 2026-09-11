@@ -2,7 +2,7 @@
 
 AI court Discord bot that rules fiction / death-battle matchups with receipts.
 
-Lean stack: `discord.py`, OpenAI-compatible chat completions, in-memory challenge state. No database, no web UI.
+Lean stack: `discord.py`, Anthropic (preferred) or OpenAI-compatible chat completions, in-memory challenge state. No database, no web UI.
 
 ## Setup
 
@@ -12,7 +12,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env — at minimum OPENAI_API_KEY; add Discord vars to run the bot
+# edit .env — at minimum ANTHROPIC_API_KEY (preferred) or OPENAI_API_KEY; add Discord vars to run the bot
 ```
 
 ### Discord application
@@ -29,7 +29,9 @@ cp .env.example .env
 
 | Variable | Required | Notes |
 |----------|----------|-------|
-| `OPENAI_API_KEY` | yes (CLI + bot) | API key |
+| `ANTHROPIC_API_KEY` | preferred (CLI + bot) | Anthropic API key — used when set |
+| `ANTHROPIC_MODEL` | no | default `claude-sonnet-4-6` |
+| `OPENAI_API_KEY` | fallback | OpenAI-compatible key if Anthropic unset |
 | `OPENAI_BASE_URL` | no | OpenAI-compatible base URL |
 | `OPENAI_MODEL` | no | default `gpt-4o-mini` |
 | `DISCORD_TOKEN` | bot only | Bot token |
@@ -45,7 +47,7 @@ python -m bot.cli "Goku vs Superman"
 python -m bot.cli "Batman vs Iron Man" -c "no prep, random alley"
 ```
 
-If `OPENAI_API_KEY` is missing, the CLI prints a clear error and exits non-zero.
+Anthropic is preferred when `ANTHROPIC_API_KEY` is set; OpenAI still works via `OPENAI_API_KEY`. If neither key is set, the CLI prints a clear error and exits non-zero.
 
 ### Discord bot
 

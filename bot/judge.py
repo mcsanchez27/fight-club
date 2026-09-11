@@ -1,12 +1,10 @@
-"""OpenAI-compatible judge with house rules and structured JSON verdicts."""
+"""LLM judge (Anthropic preferred, OpenAI-compatible fallback) with structured JSON verdicts."""
 
 from __future__ import annotations
 
 import json
 import os
 from typing import Any
-
-from openai import OpenAI
 
 SYSTEM_PROMPT = """\
 You are Fight Club Court — a sharp analytical debate judge for fiction and \
@@ -35,19 +33,6 @@ Respond with ONLY a single JSON object matching this schema (no markdown fences)
   "unknowns": [string]
 }
 """
-
-
-def _client() -> OpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not set. Copy .env.example to .env and add your key."
-        )
-    kwargs: dict[str, Any] = {"api_key": api_key}
-    base_url = os.getenv("OPENAI_BASE_URL")
-    if base_url:
-        kwargs["base_url"] = base_url
-    return OpenAI(**kwargs)
 
 
 def _parse_verdict(raw: str) -> dict[str, Any]:
@@ -81,6 +66,58 @@ def _parse_verdict(raw: str) -> dict[str, Any]:
     return data
 
 
+def _judge_anthropic(user_msg: str) -> dict[str, Any]:
+    from anthropic import Anthropic
+
+    model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    try:
+        resp = client.messages.create(
+            model=model,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+            max_tokens=2048,
+            temperature=0.4,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Anthropic request failed: {e}") from e
+
+    content = ""
+    for block in resp.content:
+        if getattr(block, "type", None) == "text":
+            content += block.text
+        elif hasattr(block, "text"):
+            content += block.text
+    return _parse_verdict(content)
+
+
+def _judge_openai(user_msg: str) -> dict[str, Any]:
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    kwargs: dict[str, Any] = {"api_key": api_key}
+    base_url = os.getenv("OPENAI_BASE_URL")
+    if base_url:
+        kwargs["base_url"] = base_url
+    client = OpenAI(**kwargs)
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.4,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        raise RuntimeError(f"OpenAI request failed: {e}") from e
+
+    content = resp.choices[0].message.content or ""
+    return _parse_verdict(content)
+
+
 def judge(
     fighter_a: str,
     fighter_b: str,
@@ -103,23 +140,14 @@ def judge(
         )
     user_msg = "\n\n".join(user_parts)
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    client = _client()
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.4,
-            response_format={"type": "json_object"},
-        )
-    except Exception as e:
-        raise RuntimeError(f"OpenAI request failed: {e}") from e
-
-    content = resp.choices[0].message.content or ""
-    return _parse_verdict(content)
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return _judge_anthropic(user_msg)
+    if os.getenv("OPENAI_API_KEY"):
+        return _judge_openai(user_msg)
+    raise RuntimeError(
+        "No LLM API key set. Set ANTHROPIC_API_KEY (preferred) or OPENAI_API_KEY. "
+        "Copy .env.example to .env and add your key."
+    )
 
 
 def format_verdict_text(v: dict[str, Any]) -> str:

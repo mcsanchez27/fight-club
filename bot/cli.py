@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Error: OpenAI request failed: {e}", file=sys.stderr)
+        print(f"Error: Judge request failed: {e}", file=sys.stderr)
         return 1
 
     print(format_verdict_text(verdict))

@@ -284,6 +284,67 @@ class FightCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 
+    docket = app_commands.Group(
+        name="docket",
+        description="Banked matchups for this server",
+    )
+
+    @docket.command(name="add", description="Bank a matchup for later")
+    @app_commands.describe(
+        matchup='Matchup label, e.g. "Goku vs Superman"',
+        notes="Optional notes / constraints",
+    )
+    async def docket_add(
+        self,
+        interaction: discord.Interaction,
+        matchup: str,
+        notes: str | None = None,
+    ) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Docket is only available in a server.",
+                ephemeral=True,
+            )
+            return
+        rid = get_db().add_docket(interaction.guild_id, matchup.strip(), notes)
+        await interaction.response.send_message(
+            f"Docketed #{rid}: **{matchup.strip()}**"
+            + (f" — _{notes}_" if notes else ""),
+            ephemeral=True,
+        )
+
+    @docket.command(name="list", description="List banked matchups for this server")
+    @app_commands.describe(limit="How many entries to show (1-25, default 15)")
+    async def docket_list(
+        self,
+        interaction: discord.Interaction,
+        limit: app_commands.Range[int, 1, 25] = 15,
+    ) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Docket is only available in a server.",
+                ephemeral=True,
+            )
+            return
+        rows = get_db().list_docket(interaction.guild_id, limit=int(limit))
+        if not rows:
+            await interaction.response.send_message(
+                "Docket is empty. Use `/docket add`.",
+                ephemeral=True,
+            )
+            return
+        lines = []
+        for row in rows:
+            note = f" — _{row['notes']}_" if row.get("notes") else ""
+            lines.append(f"#{row['id']}: **{row['matchup']}**{note}")
+        embed = discord.Embed(
+            title="📋 Banked docket",
+            description="\n".join(lines),
+            color=discord.Color.dark_blue(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+
 
 async def setup(bot: commands.Bot) -> None:
     from bot.laws import load_laws

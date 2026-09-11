@@ -90,3 +90,15 @@ def test_list_guild_rulings(tmp_path: Path) -> None:
     rows = db.list_guild_rulings(7, limit=2)
     assert len(rows) == 2
     db.close()
+
+
+def test_docket_add_and_list(tmp_path: Path) -> None:
+    db = CourtDB(tmp_path / "court.db")
+    i1 = db.add_docket(5, "A vs B", notes="open field")
+    i2 = db.add_docket(5, "C vs D")
+    assert i1 != i2
+    rows = db.list_docket(5, limit=10)
+    assert len(rows) == 2
+    assert rows[0]["matchup"] in {"A vs B", "C vs D"}
+    assert db.list_docket(99) == []
+    db.close()

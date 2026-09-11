@@ -56,7 +56,9 @@ def test_validate_verdict_ok() -> None:
 
 def test_validate_verdict_coerces_list_fields() -> None:
     v = validate_verdict(_valid(citations="solo cite", concessions="one", unknowns="?"))
-    assert v["citations"] == ["solo cite"]
+    assert len(v["citations"]) == 1
+    assert v["citations"][0]["claim"] == "solo cite"
+    assert v["citations"][0]["verified"] is False
     assert v["concessions"] == ["one"]
     assert v["unknowns"] == ["?"]
 

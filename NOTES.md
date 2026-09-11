@@ -1,33 +1,46 @@
-# NOTES — ideas not implemented in this round
+# NOTES — ideas not implemented / non-obvious choices
 
-Per brief: do not change working code unless a listed item requires it.
-Extra ideas live here only.
+Per brief: extra ideas live here only. Do not change House Rules tone.
 
-1. **OpenAI tool-use parity** — Anthropic uses `deliver_verdict` tool use;
-   OpenAI fallback still uses `response_format=json_object`. Could add OpenAI
-   tools later for symmetry; not required by the brief.
+## Phase 3 implementation notes
 
-2. **Persistent Challenge views after restart** — message-id memory is now
-   backed by SQLite lookup in `get_ruling`, so Challenge on an old message
-   works after restart if the row exists. Button custom_id was already
-   persistent.
+1. **Citations `kind` column** — Single `citations` table with
+   `kind` (`receipt`|`exhibit`) rather than a separate `exhibits` table.
+   Same shape (claim, url, locator, snippet, verified, retrieved_at); keeps
+   queries and `/export` simple. Exhibits are user-pasted; receipts are
+   autonomous allowlisted fetches.
 
-3. **Cooldown refund on judge failure** — we `record()` before the LLM call so
-   failed judgments still consume cooldown/cap. Safer for cost; slightly
-   harsher UX. Could record only on success later.
+2. **Franchise detection** — Optional `/fight franchise:` slash field, else
+   alias match against `config/sources.json`. Unlisted → no retrieval →
+   legal-plea path (confidence ≤5, void + rejudge queue).
 
-4. **UTC vs America/Denver for daily cap** — cap day key uses `date.today()`
-   in the host local/UTC environment. Document or pin to UTC explicitly if
-   Matt cares about timezone boundaries.
+3. **Stdlib fetch only** — `urllib` + MediaWiki API for fandom/gateway wikis;
+   best-effort HTML text extract for Kanzenshuu. No BeautifulSoup / httpx.
+   If HTML quality is poor, consider adding `beautifulsoup4` later — not
+   required for Phase 3.
 
-5. **Embed still puts ruling in description** — steelman-first schema order is
-   enforced for the model; Discord embed keeps ruling as description for
-   readability, with steelmans as fields above winner. Could invert if desired.
+4. **Rejudge loop** — `discord.ext.tasks` every 15 minutes + processes on
+   cog start after ready. Re-fetches; if status becomes `ok`, re-judges and
+   posts into the original channel when possible.
 
-6. **`/docket remove` / claim / run** — only add/list were requested.
+5. **Cost accounting** — Estimated, not billed: ~2.5k in / 1k out without
+   retrieval; ~5k in / 1k out with (retrieval ~doubles input). Rates via
+   `FIGHT_USD_PER_MTOK_*`. Monthly hard stop is ephemeral.
 
-7. **pytest in requirements.txt** — added so CI/local test install is one file;
-   runtime bot does not need it.
+6. **Stale receipts** — `stale_days` (90) in config; embed/export treat old
+   `retrieved_at` as unverified when checked (refresh on re-judge).
 
-8. **Remove OpenAI dependency** — brief says lean Anthropic stack; OpenAI
-   remains as fallback from prior commits. Not removed.
+## Earlier notes (still open / deferred)
+
+7. **OpenAI tool-use parity** — Anthropic uses `deliver_verdict` tool use;
+   OpenAI fallback still uses `response_format=json_object`.
+
+8. **Cooldown refund on judge failure** — `record()` before the LLM call so
+   failed judgments still consume cooldown/cap.
+
+9. **UTC vs America/Denver for daily cap** — day key uses `date.today()` in
+   the host environment.
+
+10. **`/docket remove` / claim / run** — only add/list were requested.
+
+11. **Remove OpenAI dependency** — remains as fallback; not removed.

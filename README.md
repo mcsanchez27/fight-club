@@ -2,7 +2,7 @@
 
 AI court Discord bot that rules fiction / death-battle matchups with receipts.
 
-Lean stack: `discord.py`, Anthropic (preferred) or OpenAI-compatible chat completions, stdlib SQLite for court records. No web UI.
+Lean stack: `discord.py`, Anthropic (preferred) or OpenAI-compatible chat completions, stdlib SQLite for court records, stdlib `urllib` for allowlisted wiki fetch. No web UI. No Notion.
 
 ## Setup
 
@@ -38,6 +38,11 @@ cp .env.example .env
 | `DISCORD_APPLICATION_ID` | optional | handy for invite docs |
 | `FIGHT_COOLDOWN_SECONDS` | no | per-user cooldown between judge calls (default `60`) |
 | `FIGHT_GUILD_DAILY_CAP` | no | max judge calls per guild per UTC day (default `50`) |
+| `FIGHT_MONTHLY_USD_CAP` | no | estimated spend hard stop (default `20`) |
+| `FIGHT_TOKEN_CEILING` | no | per-ruling in+out token estimate ceiling (default `16000`) |
+| `FIGHT_RETRIEVAL_ENABLED` | no | `1`/`0` — disable autonomous wiki fetch (default `1`) |
+| `FIGHT_USD_PER_MTOK_INPUT` | no | estimate rate $/M input tokens (default `3.0`) |
+| `FIGHT_USD_PER_MTOK_OUTPUT` | no | estimate rate $/M output tokens (default `15.0`) |
 
 ## Run
 
@@ -59,11 +64,31 @@ python -m bot
 ```
 
 Then in Discord:
-- `/fight fighter_a:… fighter_b:… context:…` (context optional)
-- `/standings [limit]` — last N rulings in this server (matchup, winner, confidence, original/revised)
+- `/fight fighter_a:… fighter_b:… [context] [franchise] [exhibits]` — exhibits are user-pasted **EXHIBITS**; autonomous wiki fetch produces **RECEIPTS** when the franchise maps in `config/sources.json`
+- `/export [message_id]` — markdown block of a ruling for paste-anywhere (ephemeral)
+- `/standings [limit]` — last N rulings in this server
 - `/laws` — Laws of the Court (from `laws.md`, also injected into the judge system prompt)
-- `/docket add` / `/docket list` — bank matchups per server in SQLite  
-Use the **Challenge** button on a ruling to submit new evidence; the court re-judges with the prior verdict plus your challenge (state keyed by ruling message id; persisted to `data/court.db`). Challenges insert a new row linked to the parent ruling and never overwrite.
+- `/docket add` / `/docket list` — bank matchups per server in SQLite
+
+Use the **Challenge** button on a ruling to submit new evidence (treated as an exhibit); the court re-judges with the prior verdict plus your challenge.
+
+## Receipts (Phase 3)
+
+- Allowlist per franchise in `config/sources.json` (Dragon Ball, ASOIAF, LotR, Vikings). Hard no: VS Battles, Reddit, YouTube, power-scaling tier lists.
+- Unlisted franchise or fetch failure → court **still rules**, embed banner `unverified: retrieval unavailable`, confidence capped at **5/10**, ruling voided and queued for automatic re-judge when retrieval returns (House Rule 3).
+- Snippets capped at **25 words**; links + locators stored; no full quotes. Receipts older than 90 days are stale.
+- SQLite `citations` table with `kind` = `receipt` | `exhibit`.
+
+### Cost estimate
+
+Retrieval roughly **doubles input tokens**. Ballpark Sonnet-class:
+
+| Mode | Tokens (in/out) | Est. $ / fight |
+|------|-----------------|----------------|
+| No retrieval | ~2.5k / 1k | ~$0.022 |
+| With retrieval | ~5k / 1k | ~$0.030 |
+
+Default monthly cap **$20** ≈ hundreds of fights before hard stop (guild daily cap still applies). See `docs/receipts-design.md`.
 
 ## House rules
 
@@ -81,7 +106,23 @@ bot/
   __init__.py
   __main__.py   # python -m bot
   cli.py        # python -m bot.cli "A vs B"
-  judge.py      # system prompt + JSON verdict
+  judge.py      # system prompt + JSON verdict + receipt guardrails
+  retrieval.py  # allowlisted urllib fetch
+  sources.py    # config/sources.json allowlist + hard-nos
   embeds.py     # Discord embed formatter
-  commands.py   # /fight + Challenge view
+  export.py     # /export markdown
+  budget.py     # monthly $ + token ceiling
+  commands.py   # slash commands + Challenge view + rejudge loop
+  db.py         # SQLite court.db
+config/
+  sources.json  # franchise allowlist
+docs/
+  receipts-design.md
+```
+
+## Tests
+
+```bash
+source .venv/bin/activate
+pytest -q
 ```

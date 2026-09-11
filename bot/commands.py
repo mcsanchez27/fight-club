@@ -9,12 +9,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.db import get_db
 from bot.embeds import verdict_embed
 from bot.judge import judge
 from bot.limits import limiter
 
 # ruling state per ruling message id (in-memory only)
-# value: {"verdict", "fighter_a", "fighter_b", "context"}
+# value: {verdict, fighter_a, fighter_b, context, ruling_id}
 _last_verdict: dict[int, dict[str, Any]] = {}
 
 
@@ -25,6 +26,7 @@ def store_ruling(
     fighter_a: str,
     fighter_b: str,
     context: str | None = None,
+    ruling_id: int | None = None,
 ) -> None:
     """Associate a verdict and matchup fields with the Discord message that displayed it."""
     _last_verdict[message_id] = {
@@ -32,12 +34,59 @@ def store_ruling(
         "fighter_a": fighter_a,
         "fighter_b": fighter_b,
         "context": context,
+        "ruling_id": ruling_id,
     }
 
 
 def get_ruling(message_id: int) -> dict[str, Any] | None:
-    """Look up stored ruling state for a message, if still in memory."""
-    return _last_verdict.get(message_id)
+    """Look up stored ruling state for a message (memory, then SQLite)."""
+    state = _last_verdict.get(message_id)
+    if state:
+        return state
+    row = get_db().get_ruling_by_message_id(message_id)
+    if not row:
+        return None
+    state = {
+        "verdict": row["verdict"],
+        "fighter_a": row["fighter_a"],
+        "fighter_b": row["fighter_b"],
+        "context": row["context"],
+        "ruling_id": row["id"],
+    }
+    _last_verdict[message_id] = state
+    return state
+
+
+def _persist_ruling(
+    *,
+    message_id: int,
+    channel_id: int | None,
+    guild_id: int | None,
+    fighter_a: str,
+    fighter_b: str,
+    context: str | None,
+    verdict: dict[str, Any],
+    parent_ruling_id: int | None = None,
+) -> int:
+    ruling_id = get_db().insert_ruling(
+        message_id=message_id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        fighter_a=fighter_a,
+        fighter_b=fighter_b,
+        context=context,
+        verdict=verdict,
+        parent_ruling_id=parent_ruling_id,
+    )
+    store_ruling(
+        message_id,
+        verdict,
+        fighter_a=fighter_a,
+        fighter_b=fighter_b,
+        context=context,
+        ruling_id=ruling_id,
+    )
+    return ruling_id
 
 
 class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
@@ -56,12 +105,14 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
         fighter_a: str,
         fighter_b: str,
         context: str | None,
+        parent_ruling_id: int | None,
     ):
         super().__init__()
         self.prior = prior
         self.fighter_a = fighter_a
         self.fighter_b = fighter_b
         self.context = context
+        self.parent_ruling_id = parent_ruling_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         reject = limiter.check(interaction.user.id, interaction.guild_id)
@@ -87,12 +138,15 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
             embed=verdict_embed(verdict),
             view=ChallengeView(),
         )
-        store_ruling(
-            msg.id,
-            verdict,
+        _persist_ruling(
+            message_id=msg.id,
+            channel_id=interaction.channel_id,
+            guild_id=interaction.guild_id,
             fighter_a=self.fighter_a,
             fighter_b=self.fighter_b,
             context=self.context,
+            verdict=verdict,
+            parent_ruling_id=self.parent_ruling_id,
         )
 
 
@@ -122,6 +176,7 @@ class ChallengeView(discord.ui.View):
                 fighter_a=state["fighter_a"],
                 fighter_b=state["fighter_b"],
                 context=state.get("context"),
+                parent_ruling_id=state.get("ruling_id"),
             )
         )
 
@@ -157,15 +212,19 @@ class FightCog(commands.Cog):
         msg = await interaction.followup.send(
             embed=verdict_embed(verdict), view=ChallengeView()
         )
-        store_ruling(
-            msg.id,
-            verdict,
+        _persist_ruling(
+            message_id=msg.id,
+            channel_id=interaction.channel_id,
+            guild_id=interaction.guild_id,
             fighter_a=fighter_a,
             fighter_b=fighter_b,
             context=context,
+            verdict=verdict,
+            parent_ruling_id=None,
         )
 
 
 async def setup(bot: commands.Bot) -> None:
+    get_db()  # ensure schema exists at startup
     await bot.add_cog(FightCog(bot))
     bot.add_view(ChallengeView())  # persistent challenge button

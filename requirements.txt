@@ -2,3 +2,4 @@ discord.py>=2.3
 openai
 anthropic>=0.40,<1
 python-dotenv
+pytest

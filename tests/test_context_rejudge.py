@@ -17,6 +17,7 @@ def test_challenge_modal_passes_fighters_and_context_explicitly() -> None:
         fighter_a="Goku",
         fighter_b="Superman",
         context="no prep, random alley",
+        parent_ruling_id=1,
     )
 
     captured: dict = {}
@@ -53,9 +54,13 @@ def test_challenge_modal_passes_fighters_and_context_explicitly() -> None:
     modal.evidence = "new canon citation"  # type: ignore[assignment]
 
     async def run() -> None:
+        fake_db = MagicMock()
+        fake_db.insert_ruling.return_value = 2
         with patch("bot.commands.judge", side_effect=fake_judge), patch(
             "bot.commands.verdict_embed", return_value=MagicMock()
-        ), patch("bot.commands.ChallengeView", return_value=MagicMock()):
+        ), patch("bot.commands.ChallengeView", return_value=MagicMock()), patch(
+            "bot.commands.get_db", return_value=fake_db
+        ):
             await modal.on_submit(interaction)
 
     asyncio.run(run())

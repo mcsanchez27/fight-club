@@ -2,7 +2,7 @@
 
 AI court Discord bot that rules fiction / death-battle matchups with receipts.
 
-Lean stack: `discord.py`, Anthropic (preferred) or OpenAI-compatible chat completions, in-memory challenge state. No database, no web UI.
+Lean stack: `discord.py`, Anthropic (preferred) or OpenAI-compatible chat completions, stdlib SQLite for court records. No web UI.
 
 ## Setup
 
@@ -59,7 +59,7 @@ python -m bot
 ```
 
 Then in Discord: `/fight fighter_a:… fighter_b:… context:…` (context optional).  
-Use the **Challenge** button on a ruling to submit new evidence; the court re-judges with the prior verdict plus your challenge (last verdict stored per ruling message id in memory).
+Use the **Challenge** button on a ruling to submit new evidence; the court re-judges with the prior verdict plus your challenge (state keyed by ruling message id; persisted to `data/court.db`). Challenges insert a new row linked to the parent ruling and never overwrite.
 
 ## House rules
 

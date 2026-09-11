@@ -1,4 +1,4 @@
-"""LLM judge (Anthropic preferred, OpenAI-compatible fallback) with structured JSON verdicts."""
+"""LLM judge (Anthropic preferred, OpenAI-compatible fallback) with structured verdicts."""
 
 from __future__ import annotations
 
@@ -19,11 +19,56 @@ VERDICT_REQUIRED_FIELDS = (
     "citations",
 )
 
-SYSTEM_PROMPT = """\
-You are Fight Club Court — a sharp analytical debate judge for fiction and \
-death-battle matchups. You price logistics, character flaws, and win conditions, \
-not just power levels. Tone: precise, cutting, fair.
+VERDICT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "matchup": {"type": "string", "description": "The matchup label, e.g. 'A vs B'"},
+        "steelman_a": {
+            "type": "string",
+            "description": "Strongest case for fighter A, before ruling",
+        },
+        "steelman_b": {
+            "type": "string",
+            "description": "Strongest case for fighter B, before ruling",
+        },
+        "concessions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Genuine advantages conceded to either side",
+        },
+        "unknowns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Material the court does not know; legal pleas, not losses",
+        },
+        "ruling": {
+            "type": "string",
+            "description": "2-4 sentence ruling after steelmans and concessions",
+        },
+        "winner": {"type": "string", "description": "Who wins"},
+        "confidence": {
+            "type": "number",
+            "description": "Confidence 0-10",
+        },
+        "citations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Canon or doctrine citations",
+        },
+    },
+    "required": list(VERDICT_REQUIRED_FIELDS),
+}
 
+DELIVER_VERDICT_TOOL: dict[str, Any] = {
+    "name": "deliver_verdict",
+    "description": (
+        "Deliver the court's structured verdict. Call this once with steelmans, "
+        "concessions, and unknowns filled before ruling/winner/confidence."
+    ),
+    "input_schema": VERDICT_INPUT_SCHEMA,
+}
+
+HOUSE_RULES = """\
 HOUSE RULES
 1. Steelman first — present each side's strongest case before ruling.
 2. Concede what's earned — acknowledge genuine advantages without hedging.
@@ -32,10 +77,27 @@ not a loss; put unknowns in the unknowns list.
 4. Rulings carry confidence X/10 and are revisable on new evidence.
 5. Traps are legal — clever setup, environment abuse, and prep are valid.
 6. The migraine gets the final say. Court recesses whenever the King calls it.
+"""
 
-Respond with ONLY a single JSON object matching this schema (no markdown fences).
-Build fields in this order — steelman and concessions before you lock a winner:
-{
+SYSTEM_PROMPT = f"""\
+You are Fight Club Court — a sharp analytical debate judge for fiction and \
+death-battle matchups. You price logistics, character flaws, and win conditions, \
+not just power levels. Tone: precise, cutting, fair.
+
+{HOUSE_RULES}
+Deliver the verdict by calling the deliver_verdict tool. Fill steelman_a, \
+steelman_b, concessions, and unknowns before ruling, winner, confidence, and citations.
+"""
+
+# OpenAI fallback still asks for raw JSON (no tool-use path yet).
+SYSTEM_PROMPT_OPENAI = f"""\
+You are Fight Club Court — a sharp analytical debate judge for fiction and \
+death-battle matchups. You price logistics, character flaws, and win conditions, \
+not just power levels. Tone: precise, cutting, fair.
+
+{HOUSE_RULES}
+Respond with ONLY a single JSON object matching this schema:
+{{
   "matchup": string,
   "steelman_a": string,
   "steelman_b": string,
@@ -45,32 +107,12 @@ Build fields in this order — steelman and concessions before you lock a winner
   "winner": string,
   "confidence": number 0-10,
   "citations": [string]
-}
+}}
 """
 
 
-def _parse_verdict(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        # drop opening fence and optional closing fence
-        lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    data = json.loads(text)
-    for key in VERDICT_REQUIRED_FIELDS:
-        if key not in data:
-            raise ValueError(f"Verdict missing required field: {key}")
-    data["confidence"] = float(data["confidence"])
-    for list_key in ("citations", "concessions", "unknowns"):
-        if not isinstance(data[list_key], list):
-            data[list_key] = [str(data[list_key])]
-    return data
-
-
 def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
-    """Validate and normalize a verdict dict (no code-fence stripping)."""
+    """Validate and normalize a verdict dict."""
     if not isinstance(data, dict):
         raise ValueError("Verdict must be a dict")
     for key in VERDICT_REQUIRED_FIELDS:
@@ -84,29 +126,40 @@ def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _extract_tool_verdict(resp: Any) -> dict[str, Any]:
+    for block in resp.content:
+        btype = getattr(block, "type", None)
+        if btype == "tool_use" and getattr(block, "name", None) == "deliver_verdict":
+            return validate_verdict(dict(block.input))
+    raise ValueError("Anthropic response missing deliver_verdict tool use")
+
+
 def _judge_anthropic(user_msg: str) -> dict[str, Any]:
     from anthropic import Anthropic
 
     model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    try:
-        resp = client.messages.create(
-            model=model,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-            max_tokens=2048,
-            temperature=0.4,
-        )
-    except Exception as e:
-        raise RuntimeError(f"Anthropic request failed: {e}") from e
 
-    content = ""
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            content += block.text
-        elif hasattr(block, "text"):
-            content += block.text
-    return _parse_verdict(content)
+    def _call() -> dict[str, Any]:
+        try:
+            resp = client.messages.create(
+                model=model,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_msg}],
+                max_tokens=2048,
+                temperature=0.4,
+                tools=[DELIVER_VERDICT_TOOL],
+                tool_choice={"type": "tool", "name": "deliver_verdict"},
+            )
+        except Exception as e:
+            raise RuntimeError(f"Anthropic request failed: {e}") from e
+        return _extract_tool_verdict(resp)
+
+    try:
+        return _call()
+    except ValueError:
+        # Retry once on validation / missing-tool failure
+        return _call()
 
 
 def _judge_openai(user_msg: str) -> dict[str, Any]:
@@ -119,21 +172,27 @@ def _judge_openai(user_msg: str) -> dict[str, Any]:
         kwargs["base_url"] = base_url
     client = OpenAI(**kwargs)
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.4,
-            response_format={"type": "json_object"},
-        )
-    except Exception as e:
-        raise RuntimeError(f"OpenAI request failed: {e}") from e
 
-    content = resp.choices[0].message.content or ""
-    return _parse_verdict(content)
+    def _call() -> dict[str, Any]:
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_OPENAI},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.4,
+                response_format={"type": "json_object"},
+            )
+        except Exception as e:
+            raise RuntimeError(f"OpenAI request failed: {e}") from e
+        content = resp.choices[0].message.content or ""
+        return validate_verdict(json.loads(content))
+
+    try:
+        return _call()
+    except (ValueError, json.JSONDecodeError):
+        return _call()
 
 
 def judge(

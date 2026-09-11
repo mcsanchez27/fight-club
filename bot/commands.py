@@ -12,17 +12,23 @@ from discord.ext import commands
 from bot.embeds import verdict_embed
 from bot.judge import judge
 
-# last verdict per ruling message id (in-memory only)
+# ruling state per ruling message id (in-memory only)
+# value: {"verdict": dict, "context": str | None}
 _last_verdict: dict[int, dict[str, Any]] = {}
 
 
-def store_ruling(message_id: int, verdict: dict[str, Any]) -> None:
-    """Associate a verdict with the Discord message that displayed it."""
-    _last_verdict[message_id] = verdict
+def store_ruling(
+    message_id: int,
+    verdict: dict[str, Any],
+    *,
+    context: str | None = None,
+) -> None:
+    """Associate a verdict (and original context) with the Discord message that displayed it."""
+    _last_verdict[message_id] = {"verdict": verdict, "context": context}
 
 
 def get_ruling(message_id: int) -> dict[str, Any] | None:
-    """Look up the verdict for a ruling message, if still in memory."""
+    """Look up stored ruling state for a message, if still in memory."""
     return _last_verdict.get(message_id)
 
 
@@ -35,9 +41,10 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
         max_length=1500,
     )
 
-    def __init__(self, prior: dict[str, Any]):
+    def __init__(self, prior: dict[str, Any], context: str | None):
         super().__init__()
         self.prior = prior
+        self.context = context
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
@@ -50,7 +57,7 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
                 judge,
                 a,
                 b,
-                None,
+                self.context,
                 self.prior,
                 str(self.evidence),
             )
@@ -62,7 +69,7 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
             embed=verdict_embed(verdict),
             view=ChallengeView(),
         )
-        store_ruling(msg.id, verdict)
+        store_ruling(msg.id, verdict, context=self.context)
 
 
 class ChallengeView(discord.ui.View):
@@ -78,14 +85,16 @@ class ChallengeView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         message = interaction.message
-        prior = get_ruling(message.id) if message is not None else None
-        if not prior:
+        state = get_ruling(message.id) if message is not None else None
+        if not state:
             await interaction.response.send_message(
                 "No ruling attached to this message to challenge. Run `/fight` first.",
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(ChallengeModal(prior))
+        await interaction.response.send_modal(
+            ChallengeModal(state["verdict"], state.get("context"))
+        )
 
 
 class FightCog(commands.Cog):
@@ -114,7 +123,7 @@ class FightCog(commands.Cog):
         msg = await interaction.followup.send(
             embed=verdict_embed(verdict), view=ChallengeView()
         )
-        store_ruling(msg.id, verdict)
+        store_ruling(msg.id, verdict, context=context)
 
 
 async def setup(bot: commands.Bot) -> None:

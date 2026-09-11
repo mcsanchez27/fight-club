@@ -13,7 +13,7 @@ from bot.embeds import verdict_embed
 from bot.judge import judge
 
 # ruling state per ruling message id (in-memory only)
-# value: {"verdict": dict, "context": str | None}
+# value: {"verdict", "fighter_a", "fighter_b", "context"}
 _last_verdict: dict[int, dict[str, Any]] = {}
 
 
@@ -21,10 +21,17 @@ def store_ruling(
     message_id: int,
     verdict: dict[str, Any],
     *,
+    fighter_a: str,
+    fighter_b: str,
     context: str | None = None,
 ) -> None:
-    """Associate a verdict (and original context) with the Discord message that displayed it."""
-    _last_verdict[message_id] = {"verdict": verdict, "context": context}
+    """Associate a verdict and matchup fields with the Discord message that displayed it."""
+    _last_verdict[message_id] = {
+        "verdict": verdict,
+        "fighter_a": fighter_a,
+        "fighter_b": fighter_b,
+        "context": context,
+    }
 
 
 def get_ruling(message_id: int) -> dict[str, Any] | None:
@@ -41,22 +48,27 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
         max_length=1500,
     )
 
-    def __init__(self, prior: dict[str, Any], context: str | None):
+    def __init__(
+        self,
+        prior: dict[str, Any],
+        *,
+        fighter_a: str,
+        fighter_b: str,
+        context: str | None,
+    ):
         super().__init__()
         self.prior = prior
+        self.fighter_a = fighter_a
+        self.fighter_b = fighter_b
         self.context = context
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        matchup = self.prior.get("matchup", "")
-        parts = matchup.split(" vs ", 1)
-        a = parts[0].strip() if parts else "A"
-        b = parts[1].strip() if len(parts) > 1 else "B"
         try:
             verdict = await asyncio.to_thread(
                 judge,
-                a,
-                b,
+                self.fighter_a,
+                self.fighter_b,
                 self.context,
                 self.prior,
                 str(self.evidence),
@@ -69,7 +81,13 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
             embed=verdict_embed(verdict),
             view=ChallengeView(),
         )
-        store_ruling(msg.id, verdict, context=self.context)
+        store_ruling(
+            msg.id,
+            verdict,
+            fighter_a=self.fighter_a,
+            fighter_b=self.fighter_b,
+            context=self.context,
+        )
 
 
 class ChallengeView(discord.ui.View):
@@ -93,7 +111,12 @@ class ChallengeView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(
-            ChallengeModal(state["verdict"], state.get("context"))
+            ChallengeModal(
+                state["verdict"],
+                fighter_a=state["fighter_a"],
+                fighter_b=state["fighter_b"],
+                context=state.get("context"),
+            )
         )
 
 
@@ -123,7 +146,13 @@ class FightCog(commands.Cog):
         msg = await interaction.followup.send(
             embed=verdict_embed(verdict), view=ChallengeView()
         )
-        store_ruling(msg.id, verdict, context=context)
+        store_ruling(
+            msg.id,
+            verdict,
+            fighter_a=fighter_a,
+            fighter_b=fighter_b,
+            context=context,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

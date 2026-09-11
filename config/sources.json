@@ -1,0 +1,130 @@
+{
+  "franchises": {
+    "dragon_ball": {
+      "label": "Dragon Ball",
+      "aliases": [
+        "dragon ball",
+        "dbz",
+        "dbs",
+        "dragonball",
+        "goku",
+        "vegeta",
+        "broly",
+        "gohan",
+        "frieza",
+        "piccolo",
+        "cell",
+        "buu",
+        "jiren",
+        "hit",
+        "beerus",
+        "whis",
+        "trunks",
+        "kefla",
+        "freezer"
+      ],
+      "sources": [
+        {
+          "name": "Dragon Ball Wiki",
+          "base_url": "https://dragonball.fandom.com",
+          "api": "mediawiki"
+        },
+        {
+          "name": "Kanzenshuu",
+          "base_url": "https://www.kanzenshuu.com",
+          "api": "html"
+        }
+      ]
+    },
+    "asoiaf": {
+      "label": "A Song of Ice and Fire",
+      "aliases": [
+        "asoiaf",
+        "a song of ice and fire",
+        "game of thrones",
+        "got",
+        "westeros",
+        "jon snow",
+        "daenerys",
+        "tyrion",
+        "arya",
+        "night king",
+        "white walker",
+        "stark",
+        "lannister",
+        "targaryen"
+      ],
+      "sources": [
+        {
+          "name": "A Wiki of Ice and Fire",
+          "base_url": "https://awoiaf.westeros.org",
+          "api": "mediawiki"
+        }
+      ]
+    },
+    "lotr": {
+      "label": "Lord of the Rings",
+      "aliases": [
+        "lotr",
+        "lord of the rings",
+        "tolkien",
+        "middle-earth",
+        "middle earth",
+        "gandalf",
+        "sauron",
+        "aragorn",
+        "frodo",
+        "gollum",
+        "legolas",
+        "gimli",
+        "balrog",
+        "mordor",
+        "hobbit"
+      ],
+      "sources": [
+        {
+          "name": "Tolkien Gateway",
+          "base_url": "https://tolkiengateway.net",
+          "api": "mediawiki"
+        }
+      ]
+    },
+    "vikings": {
+      "label": "Vikings",
+      "aliases": [
+        "vikings",
+        "ragnar",
+        "lagertha",
+        "bjorn",
+        "ivar",
+        "floki",
+        "rollo",
+        "heathen army"
+      ],
+      "sources": [
+        {
+          "name": "Vikings Wiki",
+          "base_url": "https://vikings.fandom.com",
+          "api": "mediawiki"
+        }
+      ]
+    }
+  },
+  "hard_no": [
+    "vsbattles.fandom.com",
+    "vsbattleswiki.com",
+    "vs battle",
+    "vs battles",
+    "powerlisting.fandom.com",
+    "reddit.com",
+    "redd.it",
+    "youtube.com",
+    "youtu.be",
+    "tier list",
+    "power scaling",
+    "powerscaling"
+  ],
+  "snippet_max_words": 25,
+  "stale_days": 90,
+  "cache_ttl_seconds": 86400
+}

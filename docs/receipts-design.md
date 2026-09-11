@@ -1,128 +1,155 @@
-# Receipts design (Phase 3 — design only)
+# Receipts design (Phase 3)
 
-Fight Club Court already has a `citations` string list on every verdict. That is a
+Fight Club Court already had a `citations` string list on every verdict. That was a
 label, not a receipt. Receipts mean a reader can verify the claim without trusting
-the model. This doc proposes how to get there. **No code in this phase.**
+the model.
 
 ## Goal
 
-Every material claim in a steelman or ruling should either:
+Every **load-bearing** claim in a ruling or concession should either:
 
-1. Point at a **retrievable source** (URL + quote/paraphrase + locator), or
+1. Point at a **retrievable source** (URL + locator + ≤25-word snippet), or
 2. Be tagged as an **unknown / legal plea** when retrieval comes back empty.
 
-House Rule 3 already says *"I don't know that material" is a legal plea, not a
-loss.* Empty retrieval should produce that plea — not a hallucinated citation.
+House Rule 3: *"I don't know that material" is a legal plea, not a loss.* Empty
+or unavailable retrieval produces that plea — not a hallucinated citation — and
+the court **still rules**.
 
-## Candidate sources
+Steelmans may cite optionally; they are not receipt-gated.
 
-| Source class | Examples | Pros | Cons |
-|---|---|---|---|
-| Fandom / wiki | Dragon Ball Wiki, Marvel Database, Tolkien Gateway, One Piece Wiki | Broad coverage, linkable | Secondary; edit wars; spoilers; ToS / scraping risk |
-| Official guides | databooks, artbooks, absolute editions, rulebooks | Higher authority | Paywalled, OCR, citation format messy |
-| Primary canon | episode/chapter text where licensed | Best authority | Rights; most titles unavailable as clean text |
-| Court-local | `laws.md`, prior `data/court.db` rulings | Free, on-brand | Not external canon |
-| User exhibits | paste / attachment on `/fight` or Challenge | Highest trust for that bout | Manual; uneven |
+---
 
-**Recommendation to start:** court-local Laws + prior rulings + **opt-in user
-exhibits**, plus a small allowlist of public wiki pages fetched at judge time.
-Do not scrape indiscriminately.
+## LOCKED DECISIONS (Matt)
+
+1. **Allowlist per franchise** in `config/sources.json` (not hardcoded). Seed:
+   - Dragon Ball → Dragon Ball Wiki + Kanzenshuu
+   - ASOIAF → A Wiki of Ice and Fire
+   - LotR → Tolkien Gateway
+   - Vikings → Vikings Wiki
+   **Hard no:** VS Battles Wiki, Reddit, YouTube, any power-scaling tier list.
+   Unlisted franchise → no retrieval → legal-plea path (decision 8).
+
+2. **Receipts vs exhibits**
+   - Autonomous fetch → **RECEIPTS** (`kind=receipt`).
+   - User-pasted text → **EXHIBITS** (`kind=exhibit`).
+   - Exhibit = claim; court tries to verify against allowlist; mark
+     verified/unverified. Unverified exhibits can still move a ruling; embeds
+     show the flag.
+
+3. **Receipts are load-bearing only** — required for the ruling itself and every
+   concession; optional for steelmans. Not every line.
+
+4. **SQLite `citations` table** (real, queryable):
+   `id, ruling_id, claim, source_url, locator, snippet, verified, retrieved_at`
+   plus `kind` (`receipt`|`exhibit`) — see NOTES.md.
+
+5. **Storage bar:** links + locators + snippet capped at **25 words**. No full
+   quotes. Store `retrieved_at`; receipts older than **90 days** are stale.
+
+6. **Discord-only** (no Notion). `/export` produces a markdown block of the
+   ruling for paste-anywhere.
+
+7. **Cost brakes:** monthly dollar cap env var default **$20**, hard stop with
+   ephemeral. Per-ruling token ceiling too. Guild daily call cap remains.
+
+8. **Never refuse.** If retrieval unavailable/unlisted: still rule, flag embed
+   `unverified: retrieval unavailable`, **cap confidence at 5/10**, void ruling
+   for automatic re-judge when retrieval is back. House Rule 3.
+
+---
 
 ## Retrieval step (before judging)
 
-Proposed pipeline for each `/fight` / Challenge:
+Pipeline for each `/fight` / Challenge:
 
-1. **Parse query** — fighters, context, any user-supplied exhibits.
-2. **Retrieve** — top-k passages from (a) laws.md, (b) recent guild rulings,
-   (c) allowlisted wiki pages for the fighters, (d) user exhibits.
-3. **Pack context** — attach retrieved passages to the judge user message (or a
-   `consult_sources` tool later). Cap tokens.
-4. **Judge** — existing `deliver_verdict` tool; extend citation objects (below).
-5. **Validate** — citations must reference retrieval IDs that actually appeared
-   in the packed context. Drop or flag orphans.
+1. **Parse query** — fighters, context, franchise (slash field or alias map),
+   user exhibits.
+2. **Allowlist check** — franchise mapped? If not → retrieval_status=`unlisted`.
+3. **Retrieve** — MediaWiki/HTML fetch from allowlisted bases only; reject hard-nos.
+4. **Pack context** — RECEIPTS + EXHIBITS into the judge user message; cap tokens.
+5. **Judge** — existing `deliver_verdict` tool; load-bearing claims must cite
+   receipt/exhibit ids or go in `unknowns`.
+6. **Post-process** — persist `citations` rows; if retrieval unavailable, clamp
+   confidence ≤ 5 and enqueue re-judge.
 
-Challenge flow reuses the same retrieval with the challenge text as an extra
-query.
+Challenge flow reuses the same retrieval; challenge text is also treated as an
+exhibit claim.
 
-## Citation storage and display
+---
 
-Replace free-string citations with structured objects (schema sketch):
+## Citation objects (verdict + DB)
 
 ```json
 {
   "citations": [
     {
-      "id": "src_12",
       "claim": "Broly's power rises continuously in combat",
-      "source_title": "Dragon Ball Super manga",
-      "locator": "ch. 38",
-      "url": "https://…",
-      "quote": "optional short quote",
-      "retrieval_id": "ret_7",
-      "confidence": "high|medium|low"
+      "source_url": "https://dragonball.fandom.com/wiki/Broly",
+      "locator": "Power section",
+      "snippet": "His power increases the longer he fights …",
+      "verified": true,
+      "kind": "receipt",
+      "retrieved_at": "2026-09-11T19:00:00Z"
     }
   ]
 }
 ```
 
-**SQLite:** store the verdict JSON as today; optionally a `citations` table
-keyed by `ruling_id` for queryability. Display in the Discord embed as a short
-list (`title · locator` + link); full quote on Discord is often too long — link
-out or truncate.
+Display: verified ✓ / unverified ✗ flags; retrieval-unavailable banner on embed.
 
-**Unknowns / empty retrieval:** if no passage supports a needed fact, the model
-must put it in `unknowns` (legal plea) and must not invent a URL. Validation
-rejects citations whose `retrieval_id` is missing from the packed set.
+---
 
-## Cost and latency (rough)
+## Cost and latency (estimates)
 
-Assumptions: Claude Sonnet-class judge, small retrieval pack (~2–4k tokens).
+Assumptions: Claude Sonnet-class judge (~$3/M input, ~$15/M output — override via
+env). Retrieval pack roughly **doubles input tokens** vs Phase 2.
 
 | Piece | Latency | Cost (order of magnitude) |
 |---|---|---|
-| Wiki fetch (1–3 pages, cached) | 200–800 ms cold; ~0 cached | Bandwidth only if self-hosted fetch |
-| Embedding search (if added) | 50–200 ms | Tiny vs generation |
-| Judge call (tool use, current) | 3–12 s | Dominant cost (~1 judge call / fight) |
-| Judge + retrieval pack | +10–30% tokens | +10–30% $ per fight |
-| Challenge | same as fight | Counts against guild daily cap |
+| Wiki fetch (1–3 pages, cached TTL) | 200–800 ms cold; ~0 cached | Bandwidth only |
+| Judge call (tool use) | 3–12 s | Dominant |
+| Judge + retrieval pack | ~2× input tokens | **~1.5–2× $ per fight** vs no-retrieval |
+| Challenge | same as fight | Counts against guild daily + monthly $ |
 
-Caching wiki pages per fighter name (TTL 24h) keeps repeat matchups cheap.
-Guild daily cap (already shipped) remains the primary cost brake.
+**Worked example (default caps):**
+- Phase-2 fight ≈ 2.5k in + 1k out ≈ **$0.022**
+- With retrieval ≈ 5k in + 1k out ≈ **$0.030**
+- Monthly $20 ≈ **~650–900 fights** before hard stop (before guild daily cap)
 
-**Cheaper path:** skip embeddings; keyword / title match into a curated
-snippet pack checked into the repo for frequent fighters. **Richer path:**
-vector index over wiki dumps — higher ops burden.
+Env: `FIGHT_MONTHLY_USD_CAP` (default `20`), `FIGHT_TOKEN_CEILING` (per-ruling
+prompt+completion soft ceiling; hard-stop if estimate exceeds),
+`FIGHT_RETRIEVAL_ENABLED` (default `1`).
+
+Caching wiki pages per fighter/title (TTL 24h) keeps repeat matchups cheap.
+Guild daily cap remains the primary call-volume brake; monthly $ is the spend
+brake.
+
+---
 
 ## What "I don't know that material" looks like
 
-When retrieval returns nothing useful for a fighter or a contested fact:
+When retrieval is empty, failed, or franchise unlisted:
 
-- `unknowns` includes a clear plea, e.g. `"No retrieved canon for Kefla's
-  stamina under prolonged beam struggle"`.
-- `confidence` should drop when the winner hinges on an unknown.
-- Embed shows Unknowns prominently (already does).
-- Optional: footer `receipts: 0 verified` when all citations failed validation.
+- Embed banner: **unverified: retrieval unavailable**
+- `confidence` clamped to **≤ 5/10**
+- `unknowns` includes legal pleas for missing canon
+- Ruling is **voided** and queued for automatic re-judge when retrieval returns
+- Court still delivers a ruling (House Rule 3) — never refuse
 
-## Open questions for Matt
+Stale receipts (>90 days): treated as unverified until refreshed.
 
-1. **Source allowlist** — which wikis / official texts are in-bounds for v1?
-   Any hard nos (e.g. VS Battles Wiki)?
-2. **Primary canon** — are you willing to paste exhibits for flagship bouts, or
-   should the bot fetch autonomously?
-3. **Citation bar** — must every steelman sentence have a receipt, or only the
-   load-bearing claims in `ruling`?
-4. **Storage** — keep citations only inside verdict JSON, or normalize a
-   `citations` table for `/standings` / future search?
-5. **Licensing** — OK to store short quotes in `data/court.db`, or links +
-   locators only?
-6. **UX** — Discord-only receipts, or also mirror to the Notion Court Records
-   page?
-7. **Budget** — target max $ / guild / day beyond the existing 50-call cap?
-8. **Failure mode** — if retrieval is down, judge with legal-plea bias, or
-   refuse the fight?
+---
 
-## Non-goals (this design)
+## Open questions
 
-- Building a general RAG platform.
-- Auto-editing the Notion Court Records page.
-- Trusting model-named URLs without a retrieval_id check.
+None blocking Phase 3. Franchise seed and hard-nos are locked; expand
+`config/sources.json` as needed.
+
+---
+
+## Non-goals
+
+- Building a general RAG platform / embeddings index.
+- Auto-editing Notion Court Records.
+- Trusting model-named URLs without allowlist + retrieval check.
+- Full-page quote storage.

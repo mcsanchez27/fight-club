@@ -223,6 +223,46 @@ class FightCog(commands.Cog):
             parent_ruling_id=None,
         )
 
+    @app_commands.command(
+        name="standings",
+        description="Recent Fight Club rulings in this server",
+    )
+    @app_commands.describe(limit="How many recent rulings to show (1-25, default 10)")
+    async def standings(
+        self,
+        interaction: discord.Interaction,
+        limit: app_commands.Range[int, 1, 25] = 10,
+    ) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Standings are only available in a server.",
+                ephemeral=True,
+            )
+            return
+        rows = get_db().list_guild_rulings(interaction.guild_id, limit=int(limit))
+        if not rows:
+            await interaction.response.send_message(
+                "No rulings on the record yet. Run `/fight`.",
+                ephemeral=True,
+            )
+            return
+        lines: list[str] = []
+        for i, row in enumerate(rows, start=1):
+            v = row["verdict"]
+            matchup = v.get("matchup") or f"{row['fighter_a']} vs {row['fighter_b']}"
+            winner = v.get("winner", "?")
+            conf = v.get("confidence", "?")
+            revised = "revised" if row.get("parent_ruling_id") else "original"
+            lines.append(f"{i}. **{matchup}** — {winner} ({conf}/10) · {revised}")
+        embed = discord.Embed(
+            title="⚔ Court standings",
+            description="\n".join(lines),
+            color=discord.Color.dark_gold(),
+        )
+        embed.set_footer(text=f"Last {len(rows)} ruling(s) in this server")
+        await interaction.response.send_message(embed=embed)
+
+
 
 async def setup(bot: commands.Bot) -> None:
     get_db()  # ensure schema exists at startup

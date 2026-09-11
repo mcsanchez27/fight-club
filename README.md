@@ -36,6 +36,8 @@ cp .env.example .env
 | `OPENAI_MODEL` | no | default `gpt-4o-mini` |
 | `DISCORD_TOKEN` | bot only | Bot token |
 | `DISCORD_APPLICATION_ID` | optional | handy for invite docs |
+| `FIGHT_COOLDOWN_SECONDS` | no | per-user cooldown between judge calls (default `60`) |
+| `FIGHT_GUILD_DAILY_CAP` | no | max judge calls per guild per UTC day (default `50`) |
 
 ## Run
 

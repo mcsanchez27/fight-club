@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from bot.embeds import verdict_embed
 from bot.judge import judge
+from bot.limits import limiter
 
 # ruling state per ruling message id (in-memory only)
 # value: {"verdict", "fighter_a", "fighter_b", "context"}
@@ -63,7 +64,12 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
         self.context = context
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        reject = limiter.check(interaction.user.id, interaction.guild_id)
+        if reject:
+            await interaction.response.send_message(reject, ephemeral=True)
+            return
         await interaction.response.defer(thinking=True)
+        limiter.record(interaction.user.id, interaction.guild_id)
         try:
             verdict = await asyncio.to_thread(
                 judge,
@@ -137,7 +143,12 @@ class FightCog(commands.Cog):
         fighter_b: str,
         context: str | None = None,
     ) -> None:
+        reject = limiter.check(interaction.user.id, interaction.guild_id)
+        if reject:
+            await interaction.response.send_message(reject, ephemeral=True)
+            return
         await interaction.response.defer(thinking=True)
+        limiter.record(interaction.user.id, interaction.guild_id)
         try:
             verdict = await asyncio.to_thread(judge, fighter_a, fighter_b, context)
         except Exception as e:

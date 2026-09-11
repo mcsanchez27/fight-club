@@ -6,6 +6,8 @@ import json
 import os
 from typing import Any
 
+from bot.laws import get_laws
+
 # Schema field order is intentional: steelman / concede / unknowns before the ruling.
 VERDICT_REQUIRED_FIELDS = (
     "matchup",
@@ -79,36 +81,50 @@ not a loss; put unknowns in the unknowns list.
 6. The migraine gets the final say. Court recesses whenever the King calls it.
 """
 
-SYSTEM_PROMPT = f"""\
-You are Fight Club Court — a sharp analytical debate judge for fiction and \
-death-battle matchups. You price logistics, character flaws, and win conditions, \
-not just power levels. Tone: precise, cutting, fair.
+def _laws_block() -> str:
+    laws = get_laws().strip()
+    if not laws:
+        return ""
+    return "\nLAWS OF THE COURT (cite by name when applicable)\n" + laws + "\n"
 
-{HOUSE_RULES}
-Deliver the verdict by calling the deliver_verdict tool. Fill steelman_a, \
-steelman_b, concessions, and unknowns before ruling, winner, confidence, and citations.
-"""
 
-# OpenAI fallback still asks for raw JSON (no tool-use path yet).
-SYSTEM_PROMPT_OPENAI = f"""\
-You are Fight Club Court — a sharp analytical debate judge for fiction and \
-death-battle matchups. You price logistics, character flaws, and win conditions, \
-not just power levels. Tone: precise, cutting, fair.
+def build_system_prompt() -> str:
+    return (
+        "You are Fight Club Court — a sharp analytical debate judge for fiction and "
+        "death-battle matchups. You price logistics, character flaws, and win conditions, "
+        "not just power levels. Tone: precise, cutting, fair.\n\n"
+        f"{HOUSE_RULES}"
+        f"{_laws_block()}"
+        "Deliver the verdict by calling the deliver_verdict tool. Fill steelman_a, "
+        "steelman_b, concessions, and unknowns before ruling, winner, confidence, and citations.\n"
+    )
 
-{HOUSE_RULES}
-Respond with ONLY a single JSON object matching this schema:
-{{
-  "matchup": string,
-  "steelman_a": string,
-  "steelman_b": string,
-  "concessions": [string],
-  "unknowns": [string],
-  "ruling": string (2-4 sentences),
-  "winner": string,
-  "confidence": number 0-10,
-  "citations": [string]
-}}
-"""
+
+def build_system_prompt_openai() -> str:
+    return (
+        "You are Fight Club Court — a sharp analytical debate judge for fiction and "
+        "death-battle matchups. You price logistics, character flaws, and win conditions, "
+        "not just power levels. Tone: precise, cutting, fair.\n\n"
+        f"{HOUSE_RULES}"
+        f"{_laws_block()}"
+        "Respond with ONLY a single JSON object matching this schema:\n"
+        "{\n"
+        '  "matchup": string,\n'
+        '  "steelman_a": string,\n'
+        '  "steelman_b": string,\n'
+        '  "concessions": [string],\n'
+        '  "unknowns": [string],\n'
+        '  "ruling": string (2-4 sentences),\n'
+        '  "winner": string,\n'
+        '  "confidence": number 0-10,\n'
+        '  "citations": [string]\n'
+        "}\n"
+    )
+
+
+# Back-compat names used in tests / imports
+SYSTEM_PROMPT = build_system_prompt()  # may be empty-laws until load_laws()
+SYSTEM_PROMPT_OPENAI = build_system_prompt_openai()
 
 
 def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +160,7 @@ def _judge_anthropic(user_msg: str) -> dict[str, Any]:
         try:
             resp = client.messages.create(
                 model=model,
-                system=SYSTEM_PROMPT,
+                system=build_system_prompt(),
                 messages=[{"role": "user", "content": user_msg}],
                 max_tokens=2048,
                 temperature=0.4,
@@ -178,7 +194,7 @@ def _judge_openai(user_msg: str) -> dict[str, Any]:
             resp = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT_OPENAI},
+                    {"role": "system", "content": build_system_prompt_openai()},
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=0.4,

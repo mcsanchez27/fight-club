@@ -111,10 +111,14 @@ def test_anthropic_retries_once_on_validation_failure() -> None:
 
 
 def test_house_rule_6_is_migraine() -> None:
-    from bot.judge import SYSTEM_PROMPT
+    from bot.judge import build_system_prompt
+    from bot.laws import load_laws
 
-    assert "The migraine gets the final say" in SYSTEM_PROMPT
-    assert "Transparent confidence beats fake neutrality" not in SYSTEM_PROMPT
+    load_laws()
+    prompt = build_system_prompt()
+    assert "The migraine gets the final say" in prompt
+    assert "Transparent confidence beats fake neutrality" not in prompt
+    assert "The Maki Law" in prompt
 
 
 def test_no_code_fence_stripping_helper() -> None:

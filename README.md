@@ -60,7 +60,8 @@ python -m bot
 
 Then in Discord:
 - `/fight fighter_a:… fighter_b:… context:…` (context optional)
-- `/standings [limit]` — last N rulings in this server (matchup, winner, confidence, original/revised)  
+- `/standings [limit]` — last N rulings in this server (matchup, winner, confidence, original/revised)
+- `/laws` — Laws of the Court (from `laws.md`, also injected into the judge system prompt)  
 Use the **Challenge** button on a ruling to submit new evidence; the court re-judges with the prior verdict plus your challenge (state keyed by ruling message id; persisted to `data/court.db`). Challenges insert a new row linked to the parent ruling and never overwrite.
 
 ## House rules

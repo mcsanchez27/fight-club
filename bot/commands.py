@@ -263,8 +263,32 @@ class FightCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 
+    @app_commands.command(name="laws", description="List the Laws of the Court")
+    async def laws(self, interaction: discord.Interaction) -> None:
+        from bot.laws import get_laws
+
+        text = get_laws().strip()
+        if not text:
+            await interaction.response.send_message(
+                "No laws loaded. Check laws.md on the bot host.",
+                ephemeral=True,
+            )
+            return
+        # Discord embed description limit 4096; clip if needed
+        body = text if len(text) <= 4000 else text[:3999] + "…"
+        embed = discord.Embed(
+            title="⚖ Laws of the Court",
+            description=body,
+            color=discord.Color.dark_teal(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+
 
 async def setup(bot: commands.Bot) -> None:
+    from bot.laws import load_laws
+
     get_db()  # ensure schema exists at startup
+    load_laws()
     await bot.add_cog(FightCog(bot))
     bot.add_view(ChallengeView())  # persistent challenge button

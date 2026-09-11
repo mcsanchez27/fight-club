@@ -7,6 +7,8 @@ import os
 from typing import Any
 
 from bot.laws import get_laws
+from bot.retrieval import RetrievalResult, pack_retrieval_for_prompt, retrieve
+from bot.sources import cap_snippet
 
 # Schema field order is intentional: steelman / concede / unknowns before the ruling.
 VERDICT_REQUIRED_FIELDS = (
@@ -20,6 +22,20 @@ VERDICT_REQUIRED_FIELDS = (
     "confidence",
     "citations",
 )
+
+CITATION_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "claim": {"type": "string"},
+        "source_url": {"type": "string"},
+        "locator": {"type": "string"},
+        "snippet": {"type": "string", "description": "≤25 words; no full quotes"},
+        "verified": {"type": "boolean"},
+        "kind": {"type": "string", "description": "receipt or exhibit"},
+        "retrieved_at": {"type": "string"},
+    },
+    "required": ["claim"],
+}
 
 VERDICT_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -36,7 +52,7 @@ VERDICT_INPUT_SCHEMA: dict[str, Any] = {
         "concessions": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Genuine advantages conceded to either side",
+            "description": "Genuine advantages conceded to either side (load-bearing; cite receipts)",
         },
         "unknowns": {
             "type": "array",
@@ -45,17 +61,22 @@ VERDICT_INPUT_SCHEMA: dict[str, Any] = {
         },
         "ruling": {
             "type": "string",
-            "description": "2-4 sentence ruling after steelmans and concessions",
+            "description": "2-4 sentence ruling after steelmans and concessions (load-bearing; cite receipts)",
         },
         "winner": {"type": "string", "description": "Who wins"},
         "confidence": {
             "type": "number",
-            "description": "Confidence 0-10",
+            "description": "Confidence 0-10 (capped at 5 if retrieval unavailable)",
         },
         "citations": {
             "type": "array",
-            "items": {"type": "string"},
-            "description": "Canon or doctrine citations",
+            "items": {
+                "anyOf": [
+                    {"type": "string"},
+                    CITATION_OBJECT_SCHEMA,
+                ]
+            },
+            "description": "Structured receipts/exhibits preferred; strings accepted and normalized",
         },
     },
     "required": list(VERDICT_REQUIRED_FIELDS),
@@ -65,7 +86,8 @@ DELIVER_VERDICT_TOOL: dict[str, Any] = {
     "name": "deliver_verdict",
     "description": (
         "Deliver the court's structured verdict. Call this once with steelmans, "
-        "concessions, and unknowns filled before ruling/winner/confidence."
+        "concessions, and unknowns filled before ruling/winner/confidence. "
+        "Receipts are required for the ruling and every concession; optional for steelmans."
     ),
     "input_schema": VERDICT_INPUT_SCHEMA,
 }
@@ -81,6 +103,16 @@ not a loss; put unknowns in the unknowns list.
 6. The migraine gets the final say. Court recesses whenever the King calls it.
 """
 
+RECEIPTS_RULES = """\
+RECEIPTS RULES
+- Autonomous fetches are RECEIPTS; user-pasted text is EXHIBITS.
+- Receipts are load-bearing for the ruling and every concession; optional for steelmans.
+- Prefer citing packed retrieval_ids. Never invent URLs.
+- Snippets ≤25 words. No full quotes.
+- If retrieval is unavailable/unlisted, still rule; put gaps in unknowns; keep confidence ≤5.
+"""
+
+
 def _laws_block() -> str:
     laws = get_laws().strip()
     if not laws:
@@ -94,6 +126,7 @@ def build_system_prompt() -> str:
         "death-battle matchups. You price logistics, character flaws, and win conditions, "
         "not just power levels. Tone: precise, cutting, fair.\n\n"
         f"{HOUSE_RULES}"
+        f"{RECEIPTS_RULES}"
         f"{_laws_block()}"
         "Deliver the verdict by calling the deliver_verdict tool. Fill steelman_a, "
         "steelman_b, concessions, and unknowns before ruling, winner, confidence, and citations.\n"
@@ -106,6 +139,7 @@ def build_system_prompt_openai() -> str:
         "death-battle matchups. You price logistics, character flaws, and win conditions, "
         "not just power levels. Tone: precise, cutting, fair.\n\n"
         f"{HOUSE_RULES}"
+        f"{RECEIPTS_RULES}"
         f"{_laws_block()}"
         "Respond with ONLY a single JSON object matching this schema:\n"
         "{\n"
@@ -117,7 +151,7 @@ def build_system_prompt_openai() -> str:
         '  "ruling": string (2-4 sentences),\n'
         '  "winner": string,\n'
         '  "confidence": number 0-10,\n'
-        '  "citations": [string]\n'
+        '  "citations": [string | {claim, source_url, locator, snippet, verified, kind}]\n'
         "}\n"
     )
 
@@ -125,6 +159,44 @@ def build_system_prompt_openai() -> str:
 # Back-compat names used in tests / imports
 SYSTEM_PROMPT = build_system_prompt()  # may be empty-laws until load_laws()
 SYSTEM_PROMPT_OPENAI = build_system_prompt_openai()
+
+UNVERIFIED_CONFIDENCE_CAP = 5.0
+
+
+def normalize_citation(item: Any) -> dict[str, Any]:
+    """Normalize string or dict citation; cap snippet at 25 words."""
+    if isinstance(item, str):
+        return {
+            "claim": item,
+            "source_url": "",
+            "locator": "",
+            "snippet": cap_snippet(item),
+            "verified": False,
+            "kind": "receipt",
+            "retrieved_at": "",
+        }
+    if isinstance(item, dict):
+        out = {
+            "claim": str(item.get("claim") or item.get("text") or ""),
+            "source_url": str(item.get("source_url") or item.get("url") or ""),
+            "locator": str(item.get("locator") or ""),
+            "snippet": cap_snippet(str(item.get("snippet") or item.get("quote") or "")),
+            "verified": bool(item.get("verified", False)),
+            "kind": str(item.get("kind") or "receipt"),
+            "retrieved_at": str(item.get("retrieved_at") or ""),
+        }
+        if not out["claim"]:
+            out["claim"] = out["snippet"] or out["locator"] or "citation"
+        return out
+    return {
+        "claim": str(item),
+        "source_url": "",
+        "locator": "",
+        "snippet": "",
+        "verified": False,
+        "kind": "receipt",
+        "retrieved_at": "",
+    }
 
 
 def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
@@ -136,9 +208,46 @@ def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"Verdict missing required field: {key}")
     out = dict(data)
     out["confidence"] = float(out["confidence"])
-    for list_key in ("citations", "concessions", "unknowns"):
+    for list_key in ("concessions", "unknowns"):
         if not isinstance(out[list_key], list):
             out[list_key] = [str(out[list_key])]
+    raw_cites = out["citations"]
+    if not isinstance(raw_cites, list):
+        raw_cites = [raw_cites]
+    out["citations"] = [normalize_citation(c) for c in raw_cites]
+    return out
+
+
+def apply_retrieval_guardrails(
+    verdict: dict[str, Any], result: RetrievalResult
+) -> dict[str, Any]:
+    """Cap confidence, merge packed receipts/exhibits, set retrieval metadata."""
+    out = dict(verdict)
+    out["retrieval_status"] = result.status
+    out["franchise"] = result.franchise
+    out["voided"] = bool(result.retrieval_unavailable)
+
+    if result.retrieval_unavailable:
+        out["confidence"] = min(float(out["confidence"]), UNVERIFIED_CONFIDENCE_CAP)
+        unknowns = list(out.get("unknowns") or [])
+        plea = "unverified: retrieval unavailable"
+        if plea not in unknowns:
+            unknowns.append(plea)
+        out["unknowns"] = unknowns
+
+    # Prefer packed structured passages; append any model citations not already present
+    packed = [p.to_dict() for p in (result.receipts + result.exhibits)]
+    model_cites = [normalize_citation(c) for c in (out.get("citations") or [])]
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for c in packed + model_cites:
+        key = f"{c.get('kind')}|{c.get('source_url')}|{c.get('claim')}|{c.get('snippet')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        c["snippet"] = cap_snippet(str(c.get("snippet") or ""))
+        merged.append(c)
+    out["citations"] = merged
     return out
 
 
@@ -217,13 +326,39 @@ def judge(
     context: str | None = None,
     prior_verdict: dict[str, Any] | None = None,
     challenge: str | None = None,
+    *,
+    exhibits: list[str] | None = None,
+    franchise: str | None = None,
+    skip_retrieval: bool = False,
+    retrieval_result: RetrievalResult | None = None,
 ) -> dict[str, Any]:
-    """Return a structured verdict dict for A vs B."""
+    """Return a structured verdict dict for A vs B (with receipts when available)."""
+    exhibit_list = list(exhibits or [])
+    if challenge and challenge.strip():
+        exhibit_list.append(challenge.strip())
+
+    if retrieval_result is None and not skip_retrieval:
+        retrieval_result = retrieve(
+            fighter_a,
+            fighter_b,
+            context,
+            franchise_hint=franchise,
+            exhibits=exhibit_list,
+        )
+    elif retrieval_result is None:
+        retrieval_result = RetrievalResult(
+            franchise=franchise,
+            status="disabled",
+            receipts=[],
+            exhibits=[],
+        )
+
     user_parts = [
         f"Matchup: {fighter_a} vs {fighter_b}",
     ]
     if context:
         user_parts.append(f"Context / conditions: {context}")
+    user_parts.append(pack_retrieval_for_prompt(retrieval_result))
     if prior_verdict and challenge:
         user_parts.append(
             "This is a CHALLENGE to a prior ruling. Re-judge with the new evidence. "
@@ -234,13 +369,16 @@ def judge(
     user_msg = "\n\n".join(user_parts)
 
     if os.getenv("ANTHROPIC_API_KEY"):
-        return _judge_anthropic(user_msg)
-    if os.getenv("OPENAI_API_KEY"):
-        return _judge_openai(user_msg)
-    raise RuntimeError(
-        "No LLM API key set. Set ANTHROPIC_API_KEY (preferred) or OPENAI_API_KEY. "
-        "Copy .env.example to .env and add your key."
-    )
+        verdict = _judge_anthropic(user_msg)
+    elif os.getenv("OPENAI_API_KEY"):
+        verdict = _judge_openai(user_msg)
+    else:
+        raise RuntimeError(
+            "No LLM API key set. Set ANTHROPIC_API_KEY (preferred) or OPENAI_API_KEY. "
+            "Copy .env.example to .env and add your key."
+        )
+
+    return apply_retrieval_guardrails(verdict, retrieval_result)
 
 
 def format_verdict_text(v: dict[str, Any]) -> str:
@@ -265,7 +403,20 @@ def format_verdict_text(v: dict[str, Any]) -> str:
             f"Confidence: {v['confidence']}/10",
         ]
     )
+    if v.get("retrieval_status"):
+        lines.append(f"Retrieval: {v['retrieval_status']}")
     if v.get("citations"):
         lines.append("\nCitations:")
-        lines.extend(f"  - {c}" for c in v["citations"])
+        for c in v["citations"]:
+            if isinstance(c, dict):
+                flag = "verified" if c.get("verified") else "unverified"
+                kind = c.get("kind") or "receipt"
+                bit = f"[{kind}/{flag}] {c.get('claim', '')}"
+                if c.get("locator"):
+                    bit += f" · {c['locator']}"
+                if c.get("source_url"):
+                    bit += f" · {c['source_url']}"
+                lines.append(f"  - {bit}")
+            else:
+                lines.append(f"  - {c}")
     return "\n".join(lines)

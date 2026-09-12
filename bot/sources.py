@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -82,18 +83,27 @@ def detect_franchise(
         x for x in (fighter_a, fighter_b, context or "") if x
     ).lower()
 
-    # Prefer longer alias matches to reduce false positives
+    # Prefer longer alias matches. Short tokens use word boundaries so
+    # "hit" does not match "White" and "got" does not match "Goten".
     best: tuple[int, str] | None = None
     for fk, meta in franchises.items():
         aliases = [str(a).lower() for a in meta.get("aliases", [])]
         label = str(meta.get("label", "")).lower()
         candidates = aliases + ([label] if label else [])
         for alias in candidates:
-            if alias and alias in hay:
+            if alias and _alias_in_text(alias, hay):
                 score = len(alias)
                 if best is None or score > best[0]:
                     best = (score, fk)
     return best[1] if best else None
+
+
+def _alias_in_text(alias: str, hay: str) -> bool:
+    """Whole-token match; multi-word aliases still match as a phrase."""
+    if not alias or not hay:
+        return False
+    escaped = re.escape(alias)
+    return re.search(rf"(?<!\w){escaped}(?!\w)", hay) is not None
 
 
 def franchise_sources(franchise_key: str, cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:

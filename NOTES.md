@@ -11,8 +11,9 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
    autonomous allowlisted fetches.
 
 2. **Franchise detection** — Optional `/fight franchise:` slash field, else
-   alias match against `config/sources.json`. Unlisted → no retrieval →
-   legal-plea path (confidence ≤5, void + rejudge queue).
+   word-boundary alias match against `config/sources.json`. Unlisted → no
+   retrieval → legal-plea path (confidence ≤5, voided). Only
+   `retrieval_status=unavailable` is queued for automatic re-judge.
 
 3. **Stdlib fetch only** — `urllib` + MediaWiki API for fandom/gateway wikis;
    best-effort HTML text extract for Kanzenshuu. No BeautifulSoup / httpx.
@@ -35,8 +36,8 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 7. **OpenAI tool-use parity** — Anthropic uses `deliver_verdict` tool use;
    OpenAI fallback still uses `response_format=json_object`.
 
-8. **Cooldown refund on judge failure** — `record()` before the LLM call so
-   failed judgments still consume cooldown/cap.
+8. **Cooldown on judge failure** — `record()` runs only after a successful
+   judge so failed `/fight` / Challenge calls do not burn cooldown or cap.
 
 9. **UTC vs America/Denver for daily cap** — day key uses `date.today()` in
    the host environment.

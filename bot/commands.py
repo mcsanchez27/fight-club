@@ -25,8 +25,6 @@ from bot.retrieval import retrieve
 
 log = logging.getLogger("fightclub")
 
-# ruling state per ruling message id (in-memory only)
-# value: {verdict, fighter_a, fighter_b, context, ruling_id}
 _last_verdict: dict[int, dict[str, Any]] = {}
 
 
@@ -39,7 +37,6 @@ def store_ruling(
     context: str | None = None,
     ruling_id: int | None = None,
 ) -> None:
-    """Associate a verdict and matchup fields with the Discord message that displayed it."""
     _last_verdict[message_id] = {
         "verdict": verdict,
         "fighter_a": fighter_a,
@@ -50,7 +47,6 @@ def store_ruling(
 
 
 def get_ruling(message_id: int) -> dict[str, Any] | None:
-    """Look up stored ruling state for a message (memory, then SQLite)."""
     state = _last_verdict.get(message_id)
     if state:
         return state
@@ -73,14 +69,8 @@ def _persist_citations(ruling_id: int, verdict: dict[str, Any]) -> None:
     for c in verdict.get("citations") or []:
         if isinstance(c, str):
             db.insert_citation(
-                ruling_id=ruling_id,
-                claim=c,
-                source_url=None,
-                locator=None,
-                snippet=None,
-                verified=False,
-                retrieved_at=None,
-                kind="receipt",
+                ruling_id=ruling_id, claim=c, source_url=None, locator=None,
+                snippet=None, verified=False, retrieved_at=None, kind="receipt",
             )
             continue
         if not isinstance(c, dict):
@@ -125,20 +115,17 @@ def _persist_ruling(
         voided=voided,
     )
     _persist_citations(ruling_id, verdict)
-    if voided or retrieval_status in {"unavailable", "unlisted"}:
+    # Only auto-retry hard fetch failures. Unlisted/disabled never become
+    # ok without a config change, so don't spin the queue forever.
+    if retrieval_status == "unavailable":
         get_db().enqueue_rejudge(
             ruling_id,
             reason=f"retrieval_status={retrieval_status}",
         )
     store_ruling(
-        message_id,
-        verdict,
-        fighter_a=fighter_a,
-        fighter_b=fighter_b,
-        context=context,
-        ruling_id=ruling_id,
+        message_id, verdict, fighter_a=fighter_a, fighter_b=fighter_b,
+        context=context, ruling_id=ruling_id,
     )
-    # Rough usage estimate (retrieval ~doubles input)
     tin = 5000 if retrieval_status == "ok" else 2500
     record_estimated_usage(tokens_in=tin, tokens_out=1000)
     return ruling_id
@@ -160,15 +147,7 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
         max_length=1500,
     )
 
-    def __init__(
-        self,
-        prior: dict[str, Any],
-        *,
-        fighter_a: str,
-        fighter_b: str,
-        context: str | None,
-        parent_ruling_id: int | None,
-    ):
+    def __init__(self, prior: dict[str, Any], *, fighter_a: str, fighter_b: str, context: str | None, parent_ruling_id: int | None):
         super().__init__()
         self.prior = prior
         self.fighter_a = fighter_a
@@ -182,33 +161,23 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
             await interaction.response.send_message(reject, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        limiter.record(interaction.user.id, interaction.guild_id)
         try:
             verdict = await asyncio.to_thread(
-                judge,
-                self.fighter_a,
-                self.fighter_b,
-                self.context,
-                self.prior,
-                str(self.evidence),
+                judge, self.fighter_a, self.fighter_b, self.context, self.prior, str(self.evidence),
             )
         except Exception as e:
             await interaction.followup.send(f"Re-judge failed: {e}", ephemeral=True)
             return
+        limiter.record(interaction.user.id, interaction.guild_id)
         msg = await interaction.followup.send(
             content="⚖ Court revises on challenge:",
             embed=verdict_embed(verdict),
             view=ChallengeView(),
         )
         _persist_ruling(
-            message_id=msg.id,
-            channel_id=interaction.channel_id,
-            guild_id=interaction.guild_id,
-            fighter_a=self.fighter_a,
-            fighter_b=self.fighter_b,
-            context=self.context,
-            verdict=verdict,
-            parent_ruling_id=self.parent_ruling_id,
+            message_id=msg.id, channel_id=interaction.channel_id, guild_id=interaction.guild_id,
+            fighter_a=self.fighter_a, fighter_b=self.fighter_b, context=self.context,
+            verdict=verdict, parent_ruling_id=self.parent_ruling_id,
         )
 
 
@@ -216,14 +185,8 @@ class ChallengeView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="Challenge",
-        style=discord.ButtonStyle.danger,
-        custom_id="fightclub:challenge",
-    )
-    async def challenge(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    @discord.ui.button(label="Challenge", style=discord.ButtonStyle.danger, custom_id="fightclub:challenge")
+    async def challenge(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         message = interaction.message
         state = get_ruling(message.id) if message is not None else None
         if not state:
@@ -234,11 +197,8 @@ class ChallengeView(discord.ui.View):
             return
         await interaction.response.send_modal(
             ChallengeModal(
-                state["verdict"],
-                fighter_a=state["fighter_a"],
-                fighter_b=state["fighter_b"],
-                context=state.get("context"),
-                parent_ruling_id=state.get("ruling_id"),
+                state["verdict"], fighter_a=state["fighter_a"], fighter_b=state["fighter_b"],
+                context=state.get("context"), parent_ruling_id=state.get("ruling_id"),
             )
         )
 
@@ -260,7 +220,6 @@ class FightCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _process_rejudge_queue(self) -> None:
-        """Re-judge voided rulings when retrieval becomes available again."""
         db = get_db()
         pending = db.list_pending_rejudges(limit=5)
         for item in pending:
@@ -270,9 +229,7 @@ class FightCog(commands.Cog):
             ctx = item.get("context")
             franchise = item.get("franchise")
             try:
-                result = await asyncio.to_thread(
-                    retrieve, fa, fb, ctx, franchise_hint=franchise
-                )
+                result = await asyncio.to_thread(retrieve, fa, fb, ctx, franchise_hint=franchise)
             except Exception as e:
                 log.warning("rejudge retrieve failed for %s: %s", item["ruling_id"], e)
                 continue
@@ -280,54 +237,33 @@ class FightCog(commands.Cog):
                 continue
             try:
                 verdict = await asyncio.to_thread(
-                    judge,
-                    fa,
-                    fb,
-                    ctx,
-                    item.get("verdict"),
+                    judge, fa, fb, ctx, item.get("verdict"),
                     "Automatic re-judge: retrieval restored.",
-                    franchise=franchise,
-                    retrieval_result=result,
+                    franchise=franchise, retrieval_result=result,
                 )
             except Exception as e:
                 log.warning("rejudge judge failed for %s: %s", item["ruling_id"], e)
                 db.mark_rejudge_done(item["ruling_id"], status="failed")
                 continue
-
             channel_id = item.get("channel_id")
             channel = self.bot.get_channel(channel_id) if channel_id else None
             message_id = None
             if channel is not None and hasattr(channel, "send"):
                 try:
                     msg = await channel.send(
-                        content=(
-                            f"⚖ Automatic re-judge for voided ruling "
-                            f"#{item['ruling_id']} (retrieval restored):"
-                        ),
-                        embed=verdict_embed(verdict),
-                        view=ChallengeView(),
+                        content=f"⚖ Automatic re-judge for voided ruling #{item['ruling_id']} (retrieval restored):",
+                        embed=verdict_embed(verdict), view=ChallengeView(),
                     )
                     message_id = msg.id
                 except Exception as e:
                     log.warning("rejudge send failed: %s", e)
-
             new_id = _persist_ruling(
-                message_id=message_id or 0,
-                channel_id=channel_id,
-                guild_id=item.get("guild_id"),
-                fighter_a=fa,
-                fighter_b=fb,
-                context=ctx,
-                verdict=verdict,
+                message_id=message_id or 0, channel_id=channel_id, guild_id=item.get("guild_id"),
+                fighter_a=fa, fighter_b=fb, context=ctx, verdict=verdict,
                 parent_ruling_id=item["ruling_id"],
             )
             db.mark_rejudge_done(item["ruling_id"], status="done")
-            log.info(
-                "rejudge complete parent=%s new=%s status=%s",
-                item["ruling_id"],
-                new_id,
-                verdict.get("retrieval_status"),
-            )
+            log.info("rejudge complete parent=%s new=%s status=%s", item["ruling_id"], new_id, verdict.get("retrieval_status"))
 
     @app_commands.command(name="fight", description="Judge a fiction / death-battle matchup")
     @app_commands.describe(
@@ -338,91 +274,53 @@ class FightCog(commands.Cog):
         exhibits="Optional user-pasted evidence (EXHIBIT; court tries to verify)",
     )
     async def fight(
-        self,
-        interaction: discord.Interaction,
-        fighter_a: str,
-        fighter_b: str,
-        context: str | None = None,
-        franchise: str | None = None,
-        exhibits: str | None = None,
+        self, interaction: discord.Interaction, fighter_a: str, fighter_b: str,
+        context: str | None = None, franchise: str | None = None, exhibits: str | None = None,
     ) -> None:
         reject = _preflight(interaction)
         if reject:
             await interaction.response.send_message(reject, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        limiter.record(interaction.user.id, interaction.guild_id)
-
         exhibit_list = [exhibits] if exhibits and exhibits.strip() else []
         try:
             result = await asyncio.to_thread(
-                retrieve,
-                fighter_a,
-                fighter_b,
-                context,
-                franchise_hint=franchise,
-                exhibits=exhibit_list,
+                retrieve, fighter_a, fighter_b, context,
+                franchise_hint=franchise, exhibits=exhibit_list,
             )
             from bot.retrieval import pack_retrieval_for_prompt
-
             approx_prompt = pack_retrieval_for_prompt(result) + ("x" * 4000)
             tok_reject = assert_token_pack(estimate_tokens(approx_prompt), max_out=2048)
             if tok_reject:
                 await interaction.followup.send(tok_reject, ephemeral=True)
                 return
             verdict = await asyncio.to_thread(
-                judge,
-                fighter_a,
-                fighter_b,
-                context,
-                None,
-                None,
-                exhibits=exhibit_list,
-                franchise=franchise,
-                retrieval_result=result,
+                judge, fighter_a, fighter_b, context, None, None,
+                exhibits=exhibit_list, franchise=franchise, retrieval_result=result,
             )
         except Exception as e:
             await interaction.followup.send(f"Judgment failed: {e}", ephemeral=True)
             return
-        msg = await interaction.followup.send(
-            embed=verdict_embed(verdict), view=ChallengeView()
-        )
+        limiter.record(interaction.user.id, interaction.guild_id)
+        msg = await interaction.followup.send(embed=verdict_embed(verdict), view=ChallengeView())
         _persist_ruling(
-            message_id=msg.id,
-            channel_id=interaction.channel_id,
-            guild_id=interaction.guild_id,
-            fighter_a=fighter_a,
-            fighter_b=fighter_b,
-            context=context,
-            verdict=verdict,
+            message_id=msg.id, channel_id=interaction.channel_id, guild_id=interaction.guild_id,
+            fighter_a=fighter_a, fighter_b=fighter_b, context=context, verdict=verdict,
             parent_ruling_id=None,
         )
 
-    @app_commands.command(
-        name="export",
-        description="Export a ruling as a markdown block for paste-anywhere",
-    )
-    @app_commands.describe(
-        message_id="Discord message ID of the ruling (default: reply/reference or latest you can see)",
-    )
-    async def export_cmd(
-        self,
-        interaction: discord.Interaction,
-        message_id: str | None = None,
-    ) -> None:
+    @app_commands.command(name="export", description="Export a ruling as a markdown block for paste-anywhere")
+    @app_commands.describe(message_id="Discord message ID of the ruling (default: reply/reference or latest you can see)")
+    async def export_cmd(self, interaction: discord.Interaction, message_id: str | None = None) -> None:
         mid: int | None = None
         if message_id:
             try:
                 mid = int(message_id.strip())
             except ValueError:
-                await interaction.response.send_message(
-                    "message_id must be an integer snowflake.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("message_id must be an integer snowflake.", ephemeral=True)
                 return
         elif interaction.message and interaction.message.reference:
             mid = interaction.message.reference.message_id
-
         row = None
         state = None
         if mid is not None:
@@ -431,14 +329,9 @@ class FightCog(commands.Cog):
         elif interaction.guild_id is not None:
             rows = get_db().list_guild_rulings(interaction.guild_id, limit=1)
             row = rows[0] if rows else None
-
         if not row and not state:
-            await interaction.response.send_message(
-                "No ruling found. Pass message_id or run `/fight` first.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("No ruling found. Pass message_id or run `/fight` first.", ephemeral=True)
             return
-
         if row:
             verdict = row["verdict"]
             fa, fb, ctx = row["fighter_a"], row["fighter_b"], row.get("context")
@@ -454,44 +347,20 @@ class FightCog(commands.Cog):
             status = verdict.get("retrieval_status")
             voided = bool(verdict.get("voided"))
             cites = verdict.get("citations")
-
-        md = export_markdown(
-            verdict,
-            fighter_a=fa,
-            fighter_b=fb,
-            context=ctx,
-            franchise=franchise,
-            retrieval_status=status,
-            voided=voided,
-            citations=cites,
-        )
-        # Discord message limit 2000; trim body if needed
+        md = export_markdown(verdict, fighter_a=fa, fighter_b=fb, context=ctx, franchise=franchise, retrieval_status=status, voided=voided, citations=cites)
         if len(md) > 1900:
             md = md[:1890] + "\n```"
         await interaction.response.send_message(md, ephemeral=True)
 
-    @app_commands.command(
-        name="standings",
-        description="Recent Fight Club rulings in this server",
-    )
+    @app_commands.command(name="standings", description="Recent Fight Club rulings in this server")
     @app_commands.describe(limit="How many recent rulings to show (1-25, default 10)")
-    async def standings(
-        self,
-        interaction: discord.Interaction,
-        limit: app_commands.Range[int, 1, 25] = 10,
-    ) -> None:
+    async def standings(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 25] = 10) -> None:
         if interaction.guild_id is None:
-            await interaction.response.send_message(
-                "Standings are only available in a server.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Standings are only available in a server.", ephemeral=True)
             return
         rows = get_db().list_guild_rulings(interaction.guild_id, limit=int(limit))
         if not rows:
-            await interaction.response.send_message(
-                "No rulings on the record yet. Run `/fight`.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("No rulings on the record yet. Run `/fight`.", ephemeral=True)
             return
         lines: list[str] = []
         for i, row in enumerate(rows, start=1):
@@ -501,102 +370,57 @@ class FightCog(commands.Cog):
             conf = v.get("confidence", "?")
             revised = "revised" if row.get("parent_ruling_id") else "original"
             void = " · voided" if row.get("voided") else ""
-            lines.append(
-                f"{i}. **{matchup}** — {winner} ({conf}/10) · {revised}{void}"
-            )
-        embed = discord.Embed(
-            title="⚔ Court standings",
-            description="\n".join(lines),
-            color=discord.Color.dark_gold(),
-        )
+            lines.append(f"{i}. **{matchup}** — {winner} ({conf}/10) · {revised}{void}")
+        embed = discord.Embed(title="⚔ Court standings", description="\n".join(lines), color=discord.Color.dark_gold())
         embed.set_footer(text=f"Last {len(rows)} ruling(s) in this server")
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="laws", description="List the Laws of the Court")
     async def laws(self, interaction: discord.Interaction) -> None:
         from bot.laws import get_laws
-
         text = get_laws().strip()
         if not text:
-            await interaction.response.send_message(
-                "No laws loaded. Check laws.md on the bot host.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("No laws loaded. Check laws.md on the bot host.", ephemeral=True)
             return
-        # Discord embed description limit 4096; clip if needed
         body = text if len(text) <= 4000 else text[:3999] + "…"
-        embed = discord.Embed(
-            title="⚖ Laws of the Court",
-            description=body,
-            color=discord.Color.dark_teal(),
-        )
+        embed = discord.Embed(title="⚖ Laws of the Court", description=body, color=discord.Color.dark_teal())
         await interaction.response.send_message(embed=embed)
 
-    docket = app_commands.Group(
-        name="docket",
-        description="Banked matchups for this server",
-    )
+    docket = app_commands.Group(name="docket", description="Banked matchups for this server")
 
     @docket.command(name="add", description="Bank a matchup for later")
-    @app_commands.describe(
-        matchup='Matchup label, e.g. "Goku vs Superman"',
-        notes="Optional notes / constraints",
-    )
-    async def docket_add(
-        self,
-        interaction: discord.Interaction,
-        matchup: str,
-        notes: str | None = None,
-    ) -> None:
+    @app_commands.describe(matchup='Matchup label, e.g. "Goku vs Superman"', notes="Optional notes / constraints")
+    async def docket_add(self, interaction: discord.Interaction, matchup: str, notes: str | None = None) -> None:
         if interaction.guild_id is None:
-            await interaction.response.send_message(
-                "Docket is only available in a server.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Docket is only available in a server.", ephemeral=True)
             return
         rid = get_db().add_docket(interaction.guild_id, matchup.strip(), notes)
         await interaction.response.send_message(
-            f"Docketed #{rid}: **{matchup.strip()}**"
-            + (f" — _{notes}_" if notes else ""),
+            f"Docketed #{rid}: **{matchup.strip()}**" + (f" — _{notes}_" if notes else ""),
             ephemeral=True,
         )
 
     @docket.command(name="list", description="List banked matchups for this server")
     @app_commands.describe(limit="How many entries to show (1-25, default 15)")
-    async def docket_list(
-        self,
-        interaction: discord.Interaction,
-        limit: app_commands.Range[int, 1, 25] = 15,
-    ) -> None:
+    async def docket_list(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 25] = 15) -> None:
         if interaction.guild_id is None:
-            await interaction.response.send_message(
-                "Docket is only available in a server.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Docket is only available in a server.", ephemeral=True)
             return
         rows = get_db().list_docket(interaction.guild_id, limit=int(limit))
         if not rows:
-            await interaction.response.send_message(
-                "Docket is empty. Use `/docket add`.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Docket is empty. Use `/docket add`.", ephemeral=True)
             return
         lines = []
         for row in rows:
             note = f" — _{row['notes']}_" if row.get("notes") else ""
             lines.append(f"#{row['id']}: **{row['matchup']}**{note}")
-        embed = discord.Embed(
-            title="📋 Banked docket",
-            description="\n".join(lines),
-            color=discord.Color.dark_blue(),
-        )
+        embed = discord.Embed(title="📋 Banked docket", description="\n".join(lines), color=discord.Color.dark_blue())
         await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot) -> None:
     from bot.laws import load_laws
-
-    get_db()  # ensure schema exists at startup
+    get_db()
     load_laws()
     await bot.add_cog(FightCog(bot))
-    bot.add_view(ChallengeView())  # persistent challenge button
+    bot.add_view(ChallengeView())

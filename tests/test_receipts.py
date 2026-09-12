@@ -16,7 +16,9 @@ from bot.judge import (
 from bot.retrieval import (
     Passage,
     RetrievalResult,
+    _html_url_is_verified,
     _looks_like_article_snippet,
+    _title_matches_query,
     exhibit_from_text,
 )
 from bot.sources import (
@@ -169,3 +171,82 @@ def test_stale_receipt_unverified() -> None:
     c = normalize_citation({"claim": "old claim", "snippet": "old snippet words here", "verified": True, "retrieved_at": "2020-01-01T00:00:00Z", "kind": "receipt"})
     assert c["verified"] is False
     assert c.get("stale") is True
+
+
+def test_title_matches_query_accepts_exact_and_rejects_weak() -> None:
+    assert _title_matches_query("Goku", "Goku") is True
+    assert _title_matches_query("Goku (Dragon Ball)", "Goku") is True
+    assert _title_matches_query("Vegeta", "vegeta") is True
+    assert _title_matches_query("Goku_Black", "Goku Black") is True
+    assert _title_matches_query("Goku/Dragonball Evolution", "Goku") is False
+    assert _title_matches_query("Den-Goku", "Goku") is False
+    assert _title_matches_query("King Vegeta", "Vegeta") is False
+    assert _title_matches_query("Vegeta Saga", "Vegeta") is False
+    assert _title_matches_query("Prince Vegeta", "Vegeta") is False
+    assert _title_matches_query("Vegeta", "Goku") is False
+
+
+def test_homepage_not_verified_receipt() -> None:
+    base = "https://www.kanzenshuu.com"
+    assert _html_url_is_verified(f"{base}/", base) is False
+    assert _html_url_is_verified(base, base) is False
+    assert _html_url_is_verified(f"{base}/?s=Goku", base) is False
+    assert _html_url_is_verified(f"{base}/search?q=Goku", base) is False
+    assert _html_url_is_verified(f"{base}/guides/power-levels", base) is True
+    # Simulated Passage: homepage must never be verified
+    home = Passage(
+        claim="homepage junk",
+        source_url=f"{base}/",
+        locator="Kanzenshuu · search:Goku",
+        snippet="Goku is mentioned somewhere on the homepage chrome text here",
+        verified=_html_url_is_verified(f"{base}/", base),
+        retrieved_at="2026-09-11T12:00:00Z",
+        kind="receipt",
+    )
+    assert home.verified is False
+
+
+def test_apply_retrieval_guardrails_code_owns_verified() -> None:
+    packed_url = "https://dragonball.fandom.com/wiki/Goku"
+    receipt = Passage(
+        claim="wiki claim",
+        source_url=packed_url,
+        locator="DB Wiki · Goku",
+        snippet="Goku is a Saiyan raised on Earth",
+        verified=True,
+        retrieved_at="2026-09-11T12:00:00Z",
+        kind="receipt",
+        retrieval_id="ret_1",
+    )
+    model_fake = {
+        "claim": "model invented cite",
+        "source_url": "https://evil.example/fake",
+        "locator": "made up",
+        "snippet": "totally fabricated snippet words",
+        "verified": True,
+        "kind": "receipt",
+    }
+    laws_cite = {
+        "claim": "Laws of the Court allow traps",
+        "source_url": "",
+        "locator": "house rule 5",
+        "snippet": "traps are legal under house rules",
+        "verified": True,
+        "kind": "receipt",
+    }
+    out = apply_retrieval_guardrails(
+        _verdict(citations=[model_fake, laws_cite]),
+        RetrievalResult(
+            franchise="dragon_ball",
+            status="ok",
+            receipts=[receipt],
+            exhibits=[],
+        ),
+    )
+    by_claim = {c["claim"]: c for c in out["citations"]}
+    assert by_claim["wiki claim"]["verified"] is True
+    assert by_claim["wiki claim"]["kind"] == "receipt"
+    assert by_claim["model invented cite"]["verified"] is False
+    laws = by_claim["Laws of the Court allow traps"]
+    assert laws["verified"] is False
+    assert laws["kind"] == "exhibit"

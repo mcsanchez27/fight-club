@@ -52,7 +52,12 @@
         "white walker",
         "stark",
         "lannister",
-        "targaryen"
+        "targaryen",
+        "golden company",
+        "greyjoy",
+        "dalton greyjoy",
+        "iron islands",
+        "red kraken"
       ],
       "sources": [
         {
@@ -79,7 +84,13 @@
         "gimli",
         "balrog",
         "mordor",
-        "hobbit"
+        "hobbit",
+        "rohan",
+        "rohirrim",
+        "theoden",
+        "eomer",
+        "\u00e9omer",
+        "th\u00e9oden"
       ],
       "sources": [
         {
@@ -99,7 +110,9 @@
         "ivar",
         "floki",
         "rollo",
-        "heathen army"
+        "heathen army",
+        "ragnar lothbrok",
+        "lothbrok"
       ],
       "sources": [
         {

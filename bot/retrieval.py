@@ -111,6 +111,63 @@ def _page_fullurl(base: str, title: str, page: dict[str, Any] | None = None) -> 
     return f"{base}/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
 
 
+
+def _normalize_title_text(s: str) -> str:
+    s = (s or "").replace("_", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _core_title(s: str) -> str:
+    """Title core for matching: strip parenthetical disambiguation; keep slash paths intact."""
+    s = _normalize_title_text(s)
+    s = re.sub(r"\s*\([^)]*\)\s*", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _title_matches_query(title: str, query: str) -> bool:
+    """Strict match: after stripping parentheticals, core title must equal query (casefold).
+
+    Accepts "Goku", "Goku (Dragon Ball)". Rejects weak hits like "King Vegeta",
+    "Vegeta Saga", "Goku/Dragonball Evolution", "Den-Goku".
+    """
+    q = _core_title(query).casefold()
+    t = _core_title(title).casefold()
+    if not q or not t:
+        return False
+    return t == q
+
+
+def _page_is_missing(page: dict[str, Any] | None) -> bool:
+    if not page:
+        return True
+    if "missing" in page:
+        return True
+    pid = page.get("pageid")
+    if pid == -1 or pid == "-1":
+        return True
+    return False
+
+
+def _is_site_homepage(url: str, base: str) -> bool:
+    return (url or "").rstrip("/") == (base or "").rstrip("/")
+
+
+def _html_url_is_verified(url: str, base: str) -> bool:
+    """Verified HTML receipts: not a search URL, not the bare site homepage, path deeper than /."""
+    if not url:
+        return False
+    lower = url.lower()
+    if any(tok in lower for tok in ("?s=", "/search", "search?")):
+        return False
+    if _is_site_homepage(url, base):
+        return False
+    path = urllib.parse.urlparse(url).path or "/"
+    if path.rstrip("/") == "":
+        return False
+    return True
+
+
 def _mediawiki_extract_text(api: str, title: str) -> tuple[str, dict[str, Any]]:
     """Prefer TextExtracts; Fandom often disables it, so fall back to parse+strip."""
     page_params = {
@@ -130,6 +187,8 @@ def _mediawiki_extract_text(api: str, title: str) -> tuple[str, dict[str, Any]]:
     extract = ""
     for candidate in pages.values():
         page = candidate
+        if _page_is_missing(page):
+            return "", page
         extract = str(candidate.get("extract") or "").strip()
         if extract:
             return extract, page
@@ -154,34 +213,95 @@ def _mediawiki_extract_text(api: str, title: str) -> tuple[str, dict[str, Any]]:
     return extract, page
 
 
+def _mediawiki_passage_from_title(
+    api: str,
+    base: str,
+    title: str,
+    query: str,
+    source_name: str,
+    franchise_key: str,
+    now: str,
+) -> Passage | None:
+    extract, page = _mediawiki_extract_text(api, title)
+    if _page_is_missing(page):
+        return None
+    actual_title = str(page.get("title") or title)
+    if not _title_matches_query(actual_title, query):
+        return None
+    if not extract or len(extract.split()) < 8:
+        return None
+    fullurl = _page_fullurl(base, actual_title, page)
+    if not url_allowed(fullurl, franchise_key):
+        return None
+    return Passage(
+        claim=f"{actual_title} (wiki extract)",
+        source_url=fullurl,
+        locator=f"{source_name} · {actual_title}",
+        snippet=cap_snippet(extract),
+        verified=True,
+        retrieved_at=now,
+        kind="receipt",
+        source_title=source_name,
+    )
+
+
 def _mediawiki_search_and_extract(
     base_url: str, query: str, source_name: str, franchise_key: str
 ) -> list[Passage]:
+    """Exact-title lookup first (titles=), then filtered search; reject weak title matches."""
     base = base_url.rstrip("/")
     api = f"{base}/api.php"
-    params = {"action": "query", "list": "search", "srsearch": query, "srlimit": "2", "format": "json"}
+    now = _now_iso()
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    title_candidates = [q]
+    titled = q.title()
+    if titled.casefold() != q.casefold():
+        title_candidates.append(titled)
+
+    for title_try in title_candidates:
+        hit = _mediawiki_passage_from_title(
+            api, base, title_try, q, source_name, franchise_key, now
+        )
+        if hit:
+            return [hit]
+
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": q,
+        "srlimit": "5",
+        "format": "json",
+    }
     raw = _http_get(api + "?" + urllib.parse.urlencode(params))
     data = json.loads(raw.decode("utf-8", errors="replace"))
-    hits = (((data.get("query") or {}).get("search")) or [])[:2]
+    hits = (((data.get("query") or {}).get("search")) or [])[:5]
     out: list[Passage] = []
-    now = _now_iso()
     for hit in hits:
-        title = str(hit.get("title") or query)
-        extract, page = _mediawiki_extract_text(api, title)
-        if not extract or len(extract.split()) < 8:
+        title = str(hit.get("title") or "")
+        if not title or not _title_matches_query(title, q):
             continue
-        fullurl = _page_fullurl(base, title, page)
-        if not url_allowed(fullurl, franchise_key):
-            continue
-        out.append(Passage(claim=f"{title} (wiki extract)", source_url=fullurl, locator=f"{source_name} · {title}", snippet=cap_snippet(extract), verified=True, retrieved_at=now, kind="receipt", source_title=source_name))
+        passage = _mediawiki_passage_from_title(
+            api, base, title, q, source_name, franchise_key, now
+        )
+        if passage:
+            out.append(passage)
+        if len(out) >= 2:
+            break
     return out
 
 
 def _html_search_snippet(base_url: str, query: str, source_name: str, franchise_key: str) -> list[Passage]:
-    """Best-effort HTML fetch for non-MediaWiki allowlisted sites (e.g. Kanzenshuu)."""
+    """Best-effort HTML fetch for non-MediaWiki allowlisted sites (e.g. Kanzenshuu).
+
+    Never treats the bare homepage as a verified receipt; homepage is not a candidate.
+    """
     base = base_url.rstrip("/")
     q = urllib.parse.quote_plus(query)
-    candidates = [f"{base}/?s={q}", f"{base}/search?q={q}", f"{base}/"]
+    # Do not include bare homepage — it must never count as a verified receipt.
+    candidates = [f"{base}/?s={q}", f"{base}/search?q={q}"]
     now = _now_iso()
     for url in candidates:
         if not url_allowed(url, franchise_key) and url.rstrip("/") != base:
@@ -191,17 +311,28 @@ def _html_search_snippet(base_url: str, query: str, source_name: str, franchise_
             raw = _http_get(url)
         except Exception:
             continue
-        text = _strip_html(raw.decode("utf-8", errors="replace"))
-        lower = text.lower()
+        body = _strip_html(raw.decode("utf-8", errors="replace"))
+        lower = body.lower()
         needle = query.lower().split()[0] if query.strip() else ""
         idx = lower.find(needle) if needle else -1
-        snippet_src = text[:400] if idx < 0 else text[max(0, idx - 80) : max(0, idx - 80) + 400]
+        snippet_src = body[:400] if idx < 0 else body[max(0, idx - 80) : max(0, idx - 80) + 400]
         snippet_src = re.sub(r"\s+", " ", snippet_src).strip()
         if not _looks_like_article_snippet(snippet_src, query):
             continue
         article_url = url if url_allowed(url, franchise_key) else base
-        is_search = any(tok in url.lower() for tok in ("?s=", "/search", "search?"))
-        return [Passage(claim=f"{query} ({source_name})", source_url=article_url, locator=f"{source_name} · search:{query}", snippet=cap_snippet(snippet_src), verified=not is_search, retrieved_at=now, kind="receipt", source_title=source_name)]
+        verified = _html_url_is_verified(article_url, base)
+        return [
+            Passage(
+                claim=f"{query} ({source_name})",
+                source_url=article_url,
+                locator=f"{source_name} · search:{query}",
+                snippet=cap_snippet(snippet_src),
+                verified=verified,
+                retrieved_at=now,
+                kind="receipt",
+                source_title=source_name,
+            )
+        ]
     return []
 
 

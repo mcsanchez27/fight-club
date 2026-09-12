@@ -250,6 +250,31 @@ def apply_retrieval_guardrails(
         seen.add(key)
         c["snippet"] = cap_snippet(str(c.get("snippet") or ""))
         merged.append(c)
+
+    # Code owns verified: never trust model-minted verified=true.
+    packed_verified_urls = {
+        p.source_url for p in result.receipts if p.verified and p.source_url
+    }
+    packed_exhibit_verified = {
+        p.source_url for p in result.exhibits if p.verified and p.source_url
+    }
+    for c in merged:
+        url = c.get("source_url") or ""
+        kind = c.get("kind") or "receipt"
+        textblob = f"{c.get('claim', '')} {c.get('locator', '')} {url}".lower()
+        if "laws of the court" in textblob or "house rule" in textblob:
+            c["kind"] = "exhibit"
+            c["verified"] = False
+        elif kind == "receipt":
+            c["verified"] = bool(url and url in packed_verified_urls)
+        elif kind == "exhibit":
+            c["verified"] = bool(url and url in packed_exhibit_verified)
+        else:
+            c["verified"] = False
+        if c.get("verified") and is_stale(c.get("retrieved_at") or None):
+            c["verified"] = False
+            c["stale"] = True
+
     out["citations"] = merged
     return out
 

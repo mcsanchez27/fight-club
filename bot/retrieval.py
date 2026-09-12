@@ -44,7 +44,6 @@ class Passage:
         return asdict(self)
 
 
-# Simple in-process cache: key -> (expires_at, Passage list)
 _CACHE: dict[str, tuple[float, list[Passage]]] = {}
 
 
@@ -134,7 +133,6 @@ def _mediawiki_extract_text(api: str, title: str) -> tuple[str, dict[str, Any]]:
         extract = str(candidate.get("extract") or "").strip()
         if extract:
             return extract, page
-
     parse_params = {
         "action": "parse",
         "page": title,
@@ -161,15 +159,8 @@ def _mediawiki_search_and_extract(
 ) -> list[Passage]:
     base = base_url.rstrip("/")
     api = f"{base}/api.php"
-    params = {
-        "action": "query",
-        "list": "search",
-        "srsearch": query,
-        "srlimit": "2",
-        "format": "json",
-    }
-    search_url = api + "?" + urllib.parse.urlencode(params)
-    raw = _http_get(search_url)
+    params = {"action": "query", "list": "search", "srsearch": query, "srlimit": "2", "format": "json"}
+    raw = _http_get(api + "?" + urllib.parse.urlencode(params))
     data = json.loads(raw.decode("utf-8", errors="replace"))
     hits = (((data.get("query") or {}).get("search")) or [])[:2]
     out: list[Passage] = []
@@ -182,16 +173,170 @@ def _mediawiki_search_and_extract(
         fullurl = _page_fullurl(base, title, page)
         if not url_allowed(fullurl, franchise_key):
             continue
-        out.append(
-            Passage(
-                claim=f"{title} (wiki extract)",
-                source_url=fullurl,
-                locator=f"{source_name} · {title}",
-                snippet=cap_snippet(extract),
-                verified=True,
-                retrieved_at=now,
-                kind="receipt",
-                source_title=source_name,
-            )
-        )
+        out.append(Passage(claim=f"{title} (wiki extract)", source_url=fullurl, locator=f"{source_name} · {title}", snippet=cap_snippet(extract), verified=True, retrieved_at=now, kind="receipt", source_title=source_name))
     return out
+
+
+def _html_search_snippet(base_url: str, query: str, source_name: str, franchise_key: str) -> list[Passage]:
+    """Best-effort HTML fetch for non-MediaWiki allowlisted sites (e.g. Kanzenshuu)."""
+    base = base_url.rstrip("/")
+    q = urllib.parse.quote_plus(query)
+    candidates = [f"{base}/?s={q}", f"{base}/search?q={q}", f"{base}/"]
+    now = _now_iso()
+    for url in candidates:
+        if not url_allowed(url, franchise_key) and url.rstrip("/") != base:
+            if urllib.parse.urlparse(url).hostname != urllib.parse.urlparse(base).hostname:
+                continue
+        try:
+            raw = _http_get(url)
+        except Exception:
+            continue
+        text = _strip_html(raw.decode("utf-8", errors="replace"))
+        lower = text.lower()
+        needle = query.lower().split()[0] if query.strip() else ""
+        idx = lower.find(needle) if needle else -1
+        snippet_src = text[:400] if idx < 0 else text[max(0, idx - 80) : max(0, idx - 80) + 400]
+        snippet_src = re.sub(r"\s+", " ", snippet_src).strip()
+        if not _looks_like_article_snippet(snippet_src, query):
+            continue
+        article_url = url if url_allowed(url, franchise_key) else base
+        is_search = any(tok in url.lower() for tok in ("?s=", "/search", "search?"))
+        return [Passage(claim=f"{query} ({source_name})", source_url=article_url, locator=f"{source_name} · search:{query}", snippet=cap_snippet(snippet_src), verified=not is_search, retrieved_at=now, kind="receipt", source_title=source_name)]
+    return []
+
+
+_SEARCH_CHROME = re.compile(
+    r"you searched for|search results|forum wiki news|general info faqs|press archive|newbie guide|\bno results\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_article_snippet(text: str, query: str) -> bool:
+    """Reject nav/search chrome so junk HTML does not count as a verified receipt."""
+    words = (text or "").split()
+    if len(words) < 12:
+        return False
+    if _SEARCH_CHROME.search(text or ""):
+        return False
+    needle = (query or "").lower().split()[0] if query else ""
+    if needle and needle not in text.lower():
+        return False
+    return True
+
+
+def _fetch_for_query(franchise_key: str, query: str) -> list[Passage]:
+    cfg = load_sources_config()
+    passages: list[Passage] = []
+    for src in franchise_sources(franchise_key, cfg):
+        name = str(src.get("name") or "source")
+        base = str(src.get("base_url") or "")
+        api = str(src.get("api") or "mediawiki")
+        if not base or is_hard_no_url(base, cfg):
+            continue
+        try:
+            if api == "mediawiki":
+                passages.extend(_mediawiki_search_and_extract(base, query, name, franchise_key))
+            else:
+                passages.extend(_html_search_snippet(base, query, name, franchise_key))
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
+            continue
+        except Exception:
+            continue
+    return passages
+
+
+def exhibit_from_text(text: str, *, franchise_key: str | None, source_url: str | None = None) -> Passage:
+    """User-pasted text → EXHIBIT. verified only if URL is allowlisted."""
+    claim = (text or "").strip()
+    url = (source_url or "").strip() or None
+    verified = bool(url and franchise_key and url_allowed(url, franchise_key))
+    if url and is_hard_no_url(url):
+        verified = False
+        url = None
+    return Passage(claim=cap_snippet(claim, 40) if claim else "exhibit", source_url=url or "", locator="user exhibit", snippet=cap_snippet(claim), verified=verified, retrieved_at=_now_iso(), kind="exhibit", source_title="User exhibit")
+
+
+@dataclass
+class RetrievalResult:
+    franchise: str | None
+    status: str
+    receipts: list[Passage]
+    exhibits: list[Passage]
+
+    @property
+    def retrieval_unavailable(self) -> bool:
+        return self.status in {"unavailable", "unlisted", "disabled"}
+
+
+def retrieve(fighter_a: str, fighter_b: str, context: str | None = None, *, franchise_hint: str | None = None, exhibits: list[str] | None = None) -> RetrievalResult:
+    """Fetch allowlisted receipts; build exhibits from user pastes. Never raises for network failure."""
+    exhibit_passages = [exhibit_from_text(t, franchise_key=None) for t in (exhibits or []) if t and t.strip()]
+    if not retrieval_enabled():
+        return RetrievalResult(franchise=detect_franchise(fighter_a, fighter_b, context, franchise_hint), status="disabled", receipts=[], exhibits=exhibit_passages)
+    franchise = detect_franchise(fighter_a, fighter_b, context, franchise_hint)
+    if not franchise:
+        return RetrievalResult(franchise=None, status="unlisted", receipts=[], exhibits=[exhibit_from_text(t, franchise_key=None) for t in (exhibits or []) if t and t.strip()])
+    exhibit_passages = [exhibit_from_text(t, franchise_key=franchise) for t in (exhibits or []) if t and t.strip()]
+    queries = [fighter_a.strip(), fighter_b.strip()]
+    if context and context.strip():
+        queries.append(context.strip()[:80])
+    receipts: list[Passage] = []
+    ttl = cache_ttl_seconds()
+    any_attempted = False
+    any_success = False
+    for q in queries:
+        if not q:
+            continue
+        cache_key = f"{franchise}::{q.lower()}"
+        hit = _CACHE.get(cache_key)
+        if hit and hit[0] > time.time():
+            receipts.extend(hit[1])
+            any_attempted = True
+            any_success = True
+            continue
+        any_attempted = True
+        try:
+            found = _fetch_for_query(franchise, q)
+        except Exception:
+            found = []
+        if found:
+            any_success = True
+            _CACHE[cache_key] = (time.time() + ttl, found)
+            receipts.extend(found)
+    seen: set[str] = set()
+    deduped: list[Passage] = []
+    for p in receipts:
+        key = f"{p.source_url}|{p.locator}"
+        if key in seen:
+            continue
+        seen.add(key)
+        p.retrieval_id = f"ret_{len(deduped) + 1}"
+        deduped.append(p)
+    if not any_success:
+        return RetrievalResult(franchise=franchise, status="unavailable", receipts=[], exhibits=exhibit_passages)
+    return RetrievalResult(franchise=franchise, status="ok", receipts=deduped[:8], exhibits=exhibit_passages)
+
+
+def clear_retrieval_cache() -> None:
+    _CACHE.clear()
+
+
+def pack_retrieval_for_prompt(result: RetrievalResult) -> str:
+    """Format receipts/exhibits for the judge user message."""
+    lines: list[str] = [f"RETRIEVAL_STATUS: {result.status}"]
+    if result.franchise:
+        lines.append(f"FRANCHISE: {result.franchise}")
+    if result.retrieval_unavailable:
+        lines.append("Retrieval unavailable or franchise unlisted. Put missing canon in unknowns (legal plea). Do NOT invent URLs. Confidence will be capped at 5/10.")
+    if result.receipts:
+        lines.append("RECEIPTS (autonomous fetch — cite these for load-bearing ruling/concessions):")
+        for p in result.receipts:
+            lines.append(f"- [{p.retrieval_id}] {p.locator} | {p.source_url}\n  snippet: {p.snippet}")
+    if result.exhibits:
+        lines.append("EXHIBITS (user-pasted — verify against allowlist; flag unverified):")
+        for i, p in enumerate(result.exhibits, start=1):
+            flag = "verified" if p.verified else "unverified"
+            lines.append(f"- [ex_{i}] ({flag}) {p.claim}\n  snippet: {p.snippet}" + (f" | {p.source_url}" if p.source_url else ""))
+    if not result.receipts and not result.exhibits:
+        lines.append("No receipts or exhibits packed.")
+    return "\n".join(lines)

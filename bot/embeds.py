@@ -104,3 +104,37 @@ def verdict_embed(v: dict[str, Any]) -> discord.Embed:
     footer_bits.append(f"✓{verified_n} ✗{unverified_n}")
     embed.set_footer(text=" · ".join(footer_bits))
     return embed
+
+
+def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
+    """Challenge card for a ``proposed`` fight (Accept / Decline)."""
+    side_a = str(fight.get("side_a") or "?")
+    side_b = str(fight.get("side_b") or "?")
+    title = f"⚔ Challenge: {side_a} vs {side_b}"
+    embed = discord.Embed(
+        title=_clip(title, 250),
+        description="Accept to open arguments. Decline to void. Counter arrives in 4b.",
+        color=discord.Color.dark_gold(),
+    )
+    embed.add_field(name="Side A", value=_clip(side_a, 256), inline=True)
+    embed.add_field(name="Side B", value=_clip(side_b, 256), inline=True)
+    embed.add_field(name="​", value="​", inline=True)
+    challenger = fight.get("challenger_id")
+    challengee = fight.get("challengee_id")
+    if challenger is not None:
+        embed.add_field(name="Challenger", value=f"<@{int(challenger)}>", inline=True)
+    if challengee is not None:
+        embed.add_field(name="Challenged", value=f"<@{int(challengee)}>", inline=True)
+    ctx = fight.get("context")
+    if ctx:
+        embed.add_field(name="Context", value=_clip(str(ctx)), inline=False)
+    expires = fight.get("expires_at")
+    if expires:
+        embed.add_field(name="Expires", value=_clip(str(expires), 256), inline=False)
+    fid = fight.get("id")
+    footer = "Fight Club · challenge card"
+    if fid is not None:
+        footer += f" · fight #{int(fid)}"
+    embed.set_footer(text=footer)
+    return embed
+

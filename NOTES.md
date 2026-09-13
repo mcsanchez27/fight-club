@@ -78,3 +78,21 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 
 20. **Out of scope this commit** — challenge card / state machine UX (4a–4c),
     retrieve-at-accept (5), transcript assembly, ruling drop (7–8).
+
+## V2 item 4a (challenge card) — Sept 13 2026
+
+21. **`expire_due_fights(now)`** — pure helper over fight rows (C3 / amendment 9).
+    Called at `/fight` and Accept/Decline entry; optional `tasks.loop` left for
+    later when the bot runs. Tests freeze the clock — no Discord loop.
+
+22. **`/fight` fields** — V2 optional `opponent` / `matchup` / `context` / `side` /
+    `instant` plus V1 `fighter_a`/`fighter_b` bridge for instant. Missing bits →
+    ephemeral text only (no menus, amendment 12). Open-ended (side without
+    matchup) prompts toward 4b.
+
+23. **Accept** sets `accepted_at` and status `arguing` (accepted→arguing hop).
+    Thin `create_thread` stub only; receipts-at-accept is item 5. Counter button
+    omitted until 4b. Balance warning / free counter is 4c.
+
+24. **Out of scope this commit** — 4b Counter+modals+open-ended accept; 4c
+    balance warning+free counter; item 5 thread+receipts; lead locks A1.

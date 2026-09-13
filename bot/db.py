@@ -388,6 +388,29 @@ class CourtDB:
         ).fetchone()
         return self._row_to_fight(row) if row else None
 
+    def list_fights(
+        self,
+        *,
+        status: str | None = None,
+        guild_id: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if guild_id is not None:
+            clauses.append("guild_id = ?")
+            params.append(guild_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(int(limit))
+        rows = self._conn.execute(
+            f"SELECT * FROM fights {where} ORDER BY id ASC LIMIT ?",
+            params,
+        ).fetchall()
+        return [self._row_to_fight(r) for r in rows]
+
     def update_fight(self, fight_id: int, **fields: Any) -> None:
         """Patch fight columns. Bool fields are stored as 0/1."""
         if not fields:

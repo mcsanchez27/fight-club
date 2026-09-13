@@ -18,8 +18,17 @@ from bot.budget import (
     usage_from_verdict,
 )
 from bot.db import get_db
-from bot.embeds import verdict_embed
+from bot.embeds import challenge_card_embed, verdict_embed
 from bot.export import export_markdown
+from bot.fights import (
+    MISSING_FIGHT_PROMPT,
+    accept_fight,
+    create_proposed_fight,
+    decline_fight,
+    expire_due_fights,
+    utc_now,
+    validate_fight_fields,
+)
 from bot.judge import judge
 from bot.limits import limiter
 from bot.progress import (
@@ -237,6 +246,109 @@ class ChallengeView(discord.ui.View):
         )
 
 
+
+def _fight_id_from_custom_id(custom_id: str | None, prefix: str) -> int | None:
+    if not custom_id or not custom_id.startswith(prefix):
+        return None
+    tail = custom_id[len(prefix) :]
+    try:
+        return int(tail)
+    except ValueError:
+        return None
+
+
+class ChallengeCardView(discord.ui.View):
+    """Persistent Accept/Decline card. Counter omitted until 4b."""
+
+    def __init__(self, fight_id: int) -> None:
+        super().__init__(timeout=None)
+        self.fight_id = int(fight_id)
+        accept = discord.ui.Button(
+            label="Accept",
+            style=discord.ButtonStyle.success,
+            custom_id=f"fightclub:accept:{self.fight_id}",
+        )
+        decline = discord.ui.Button(
+            label="Decline",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"fightclub:decline:{self.fight_id}",
+        )
+        accept.callback = self.on_accept  # type: ignore[method-assign]
+        decline.callback = self.on_decline  # type: ignore[method-assign]
+        self.add_item(accept)
+        self.add_item(decline)
+
+    async def on_accept(self, interaction: discord.Interaction) -> None:
+        expire_due_fights(get_db(), utc_now())
+        fight_id = self.fight_id
+        try:
+            # Thin thread stub (full receipts = item 5).
+            thread_id = await _maybe_create_argument_thread(interaction, fight_id)
+            fight = accept_fight(
+                get_db(),
+                fight_id,
+                now=utc_now(),
+                actor_id=interaction.user.id,
+                thread_id=thread_id,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        embed = challenge_card_embed(fight)
+        embed.color = discord.Color.green()
+        note = (
+            f"Accepted — status **{fight['status']}**"
+            + (
+                f" · thread `{fight.get('thread_id')}`"
+                if fight.get("thread_id")
+                else " · thread stub pending item 5"
+            )
+        )
+        await interaction.response.edit_message(content=note, embed=embed, view=None)
+
+    async def on_decline(self, interaction: discord.Interaction) -> None:
+        expire_due_fights(get_db(), utc_now())
+        fight_id = self.fight_id
+        try:
+            fight = decline_fight(
+                get_db(),
+                fight_id,
+                now=utc_now(),
+                actor_id=interaction.user.id,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        embed = challenge_card_embed(fight)
+        embed.color = discord.Color.dark_grey()
+        await interaction.response.edit_message(
+            content="Declined — fight **voided**.",
+            embed=embed,
+            view=None,
+        )
+
+
+async def _maybe_create_argument_thread(
+    interaction: discord.Interaction, fight_id: int
+) -> int | None:
+    """Best-effort public thread under the card message. Full flow is item 5."""
+    fight = get_db().get_fight(fight_id)
+    message = interaction.message
+    if fight is None or message is None:
+        return None
+    name = f"{fight.get('side_a') or 'A'} vs {fight.get('side_b') or 'B'}"
+    name = name[:95] or f"fight-{fight_id}"
+    create = getattr(message, "create_thread", None)
+    if create is None:
+        return None
+    try:
+        thread = await create(name=name, auto_archive_duration=1440)
+        return int(getattr(thread, "id", 0) or 0) or None
+    except Exception as e:
+        log.info("thread stub skipped for fight %s: %s", fight_id, e)
+        return None
+
+
 class FightCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -299,18 +411,81 @@ class FightCog(commands.Cog):
             db.mark_rejudge_done(item["ruling_id"], status="done")
             log.info("rejudge complete parent=%s new=%s status=%s", item["ruling_id"], new_id, verdict.get("retrieval_status"))
 
-    @app_commands.command(name="fight", description="Judge a fiction / death-battle matchup")
+    @app_commands.command(name="fight", description="Challenge a user or judge an instant matchup")
     @app_commands.describe(
-        fighter_a="First fighter / faction",
-        fighter_b="Second fighter / faction",
+        opponent="Who you are challenging (proposed card path)",
+        matchup='Matchup label, e.g. "Aragorn vs Goku"',
         context="Optional arena, rules, or constraints",
-        franchise="Optional franchise key/label (dragon_ball, asoiaf, lotr, vikings)",
-        exhibits="Optional user-pasted evidence (EXHIBIT; court tries to verify)",
+        side="Your side: A, B, or a fighter name from the matchup",
+        instant="If true, skip the card and rule immediately (V1 bridge)",
+        fighter_a="V1/instant: first fighter (optional bridge until item 12)",
+        fighter_b="V1/instant: second fighter (optional bridge until item 12)",
+        franchise="Optional franchise key/label (instant path)",
+        exhibits="Optional user-pasted evidence (instant path)",
     )
     async def fight(
-        self, interaction: discord.Interaction, fighter_a: str, fighter_b: str,
-        context: str | None = None, franchise: str | None = None, exhibits: str | None = None,
+        self,
+        interaction: discord.Interaction,
+        opponent: discord.Member | None = None,
+        matchup: str | None = None,
+        context: str | None = None,
+        side: str | None = None,
+        instant: bool = False,
+        fighter_a: str | None = None,
+        fighter_b: str | None = None,
+        franchise: str | None = None,
+        exhibits: str | None = None,
     ) -> None:
+        expire_due_fights(get_db(), utc_now())
+        plan = validate_fight_fields(
+            opponent_id=opponent.id if opponent is not None else None,
+            matchup=matchup,
+            context=context,
+            side=side,
+            instant=instant,
+            fighter_a=fighter_a,
+            fighter_b=fighter_b,
+        )
+        if plan.kind == "prompt":
+            await interaction.response.send_message(
+                plan.prompt or MISSING_FIGHT_PROMPT,
+                ephemeral=True,
+            )
+            return
+
+        if plan.kind == "proposed":
+            assert opponent is not None and plan.side_a and plan.side_b
+            if opponent.id == interaction.user.id:
+                await interaction.response.send_message(
+                    "You cannot challenge yourself.",
+                    ephemeral=True,
+                )
+                return
+            fight = create_proposed_fight(
+                get_db(),
+                guild_id=interaction.guild_id,
+                channel_id=interaction.channel_id,
+                challenger_id=interaction.user.id,
+                challengee_id=opponent.id,
+                side_a=plan.side_a,
+                side_b=plan.side_b,
+                context=plan.context,
+                now=utc_now(),
+            )
+            view = ChallengeCardView(int(fight["id"]))
+            self.bot.add_view(view)
+            await interaction.response.send_message(
+                content=f"{opponent.mention} — you've been challenged.",
+                embed=challenge_card_embed(fight),
+                view=view,
+            )
+            sent = await interaction.original_response()
+            get_db().update_fight(int(fight["id"]), card_message_id=int(sent.id))
+            return
+
+        # Instant bridge (item 12 will park this on fight rows).
+        assert plan.side_a and plan.side_b
+        fa, fb = plan.side_a, plan.side_b
         reject = _preflight(interaction)
         if reject:
             await interaction.response.send_message(reject, ephemeral=True)
@@ -320,7 +495,7 @@ class FightCog(commands.Cog):
         await edit_deferred_progress(interaction, PROGRESS_RETRIEVING)
         try:
             result = await asyncio.to_thread(
-                retrieve, fighter_a, fighter_b, context,
+                retrieve, fa, fb, plan.context,
                 franchise_hint=franchise, exhibits=exhibit_list,
             )
             from bot.retrieval import pack_retrieval_for_prompt
@@ -331,7 +506,7 @@ class FightCog(commands.Cog):
                 return
             await edit_deferred_progress(interaction, PROGRESS_JUDGING)
             verdict = await asyncio.to_thread(
-                judge, fighter_a, fighter_b, context, None, None,
+                judge, fa, fb, plan.context, None, None,
                 exhibits=exhibit_list, franchise=franchise, retrieval_result=result,
             )
         except Exception as e:
@@ -341,7 +516,7 @@ class FightCog(commands.Cog):
         msg = await interaction.followup.send(embed=verdict_embed(verdict), view=ChallengeView())
         _persist_ruling(
             message_id=msg.id, channel_id=interaction.channel_id, guild_id=interaction.guild_id,
-            fighter_a=fighter_a, fighter_b=fighter_b, context=context, verdict=verdict,
+            fighter_a=fa, fighter_b=fb, context=plan.context, verdict=verdict,
             parent_ruling_id=None,
         )
 
@@ -456,7 +631,10 @@ class FightCog(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     from bot.laws import load_laws
-    get_db()
+    db = get_db()
     load_laws()
     await bot.add_cog(FightCog(bot))
     bot.add_view(ChallengeView())
+    # Re-bind persistent Accept/Decline views for open proposed fights.
+    for fight in db.list_fights(status="proposed"):
+        bot.add_view(ChallengeCardView(int(fight["id"])))

@@ -286,5 +286,20 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     (`Winner unchanged, confidence X → Y` or `Winner reversed`). Derived
     records (item 9) already take latest initial/reconsideration per fight.
 
-62. **Out of scope** — `/config` (11), instant refactor (12), README (13).
+62. **Out of scope in item 10** — completed by item 11 / pending 12–13.
 
+## V2 item 11 (`/config` + guild overrides) — Sept 13 2026
+
+63. **Single resolver** — `bot/config.py`: `get_guild_config(db, guild_id, key)` /
+    `resolve_config(db, guild_id)` apply precedence env &lt; `guild_config` &lt;
+    §7 hardcoded defaults. Existing helpers (timeouts, counters, balance,
+    archive delay, transcript max, cooldown, daily_cap, monthly_usd_cap)
+    delegate here — no dead env-only paths for §7 keys.
+
+64. **`/config`** — `manage_guild` only. No args lists all keys with effective
+    values; `key`+`value` writes `guild_config`. Invalid keys rejected.
+    `allowed_channels` empty/`[]` = all; when set, `/fight` outside the list
+    is rejected ephemeral.
+
+65. **Out of scope** — instant refactor (12), README beyond `.env.example`
+    `FIGHT_ALLOWED_CHANNELS` note (13).

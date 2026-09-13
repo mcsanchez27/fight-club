@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import date
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bot.db import CourtDB
 
 
-def cooldown_seconds() -> int:
-    return int(os.getenv("FIGHT_COOLDOWN_SECONDS", "60"))
+def cooldown_seconds(db: CourtDB | None = None, guild_id: int | None = None) -> int:
+    from bot.config import get_guild_config
+
+    return max(0, int(get_guild_config(db, guild_id, "cooldown_seconds")))
 
 
-def guild_daily_cap() -> int:
-    return int(os.getenv("FIGHT_GUILD_DAILY_CAP", "50"))
+def guild_daily_cap(db: CourtDB | None = None, guild_id: int | None = None) -> int:
+    from bot.config import get_guild_config
+
+    return max(0, int(get_guild_config(db, guild_id, "daily_cap")))
 
 
 class RateLimiter:
@@ -26,10 +33,15 @@ class RateLimiter:
         self._user_last.clear()
         self._guild_day_counts.clear()
 
-    def check(self, user_id: int, guild_id: int | None) -> str | None:
+    def check(
+        self,
+        user_id: int,
+        guild_id: int | None,
+        db: CourtDB | None = None,
+    ) -> str | None:
         """Return an ephemeral rejection message, or None if allowed."""
         now = time.time()
-        cd = cooldown_seconds()
+        cd = cooldown_seconds(db, guild_id)
         last = self._user_last.get(user_id)
         if last is not None and cd > 0:
             remaining = cd - (now - last)
@@ -40,7 +52,7 @@ class RateLimiter:
                 )
 
         if guild_id is not None:
-            cap = guild_daily_cap()
+            cap = guild_daily_cap(db, guild_id)
             key = (guild_id, date.today().isoformat())
             used = self._guild_day_counts.get(key, 0)
             if cap > 0 and used >= cap:

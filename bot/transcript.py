@@ -8,7 +8,6 @@ only — never re-fetch Discord as a second source of truth.
 from __future__ import annotations
 
 import copy
-import os
 from typing import Any, Mapping, MutableMapping, Sequence
 
 from bot.budget import estimate_tokens
@@ -22,20 +21,9 @@ MessageLike = Mapping[str, Any]
 
 def transcript_max_tokens(db: CourtDB | None, guild_id: int | None) -> int:
     """guild_config → env → 20000 (§7)."""
-    if db is not None and guild_id is not None:
-        raw = db.get_guild_config(guild_id, "transcript_max_tokens")
-        if raw is not None and str(raw).strip():
-            try:
-                return int(raw)
-            except ValueError:
-                pass
-    env = os.getenv("FIGHT_TRANSCRIPT_MAX_TOKENS")
-    if env is not None and str(env).strip():
-        try:
-            return int(env)
-        except ValueError:
-            pass
-    return DEFAULT_TRANSCRIPT_MAX_TOKENS
+    from bot.config import get_guild_config
+
+    return int(get_guild_config(db, guild_id, "transcript_max_tokens"))
 
 
 def _msg_id(msg: MessageLike) -> int | None:

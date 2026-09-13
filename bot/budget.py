@@ -8,8 +8,12 @@ from datetime import datetime, timezone
 from bot.db import CourtDB, get_db
 
 
-def monthly_usd_cap() -> float:
-    return float(os.getenv("FIGHT_MONTHLY_USD_CAP", "20"))
+def monthly_usd_cap(
+    db: CourtDB | None = None, guild_id: int | None = None
+) -> float:
+    from bot.config import get_guild_config
+
+    return float(get_guild_config(db, guild_id, "monthly_usd_cap"))
 
 
 def token_ceiling() -> int:
@@ -50,12 +54,17 @@ def estimate_ruling_cost_usd(*, with_retrieval: bool = True) -> float:
     return estimate_usd(tin, tout)
 
 
-def check_budget(db: CourtDB | None = None) -> str | None:
+def check_budget(
+    db: CourtDB | None = None, guild_id: int | None = None
+) -> str | None:
     """Return ephemeral rejection if monthly cap or token ceiling would be breached."""
     db = db or get_db()
-    cap = monthly_usd_cap()
+    cap = monthly_usd_cap(db, guild_id)
     if cap > 0:
-        spent = db.month_spend_usd(current_month())
+        try:
+            spent = float(db.month_spend_usd(current_month()) or 0.0)
+        except (TypeError, ValueError):
+            spent = 0.0
         est = estimate_ruling_cost_usd(with_retrieval=True)
         if spent + est > cap:
             return (

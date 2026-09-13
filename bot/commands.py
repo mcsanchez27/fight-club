@@ -17,6 +17,13 @@ from bot.budget import (
     record_estimated_usage,
     usage_from_verdict,
 )
+from bot.config import (
+    ConfigError,
+    channel_allowed,
+    format_config_value,
+    list_config_lines,
+    set_config,
+)
 from bot.db import get_db
 from bot.embeds import challenge_card_embed, ruling_drop_embed, verdict_embed
 from bot.records import (
@@ -193,10 +200,11 @@ def _persist_ruling(
 
 
 def _preflight(interaction: discord.Interaction) -> str | None:
-    reject = limiter.check(interaction.user.id, interaction.guild_id)
+    db = get_db()
+    reject = limiter.check(interaction.user.id, interaction.guild_id, db=db)
     if reject:
         return reject
-    return check_budget()
+    return check_budget(db, guild_id=interaction.guild_id)
 
 
 class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
@@ -950,7 +958,7 @@ class FightCog(commands.Cog):
         db = get_db()
         pending = db.list_pending_rejudges(limit=5)
         for item in pending:
-            if check_budget(db):
+            if check_budget(db, guild_id=item.get("guild_id")):
                 break
             fa, fb = item["fighter_a"], item["fighter_b"]
             ctx = item.get("context")
@@ -1018,6 +1026,14 @@ class FightCog(commands.Cog):
         exhibits: str | None = None,
     ) -> None:
         sweep_deadlines(get_db(), utc_now())
+        db = get_db()
+        if not channel_allowed(db, interaction.guild_id, interaction.channel_id):
+            await interaction.response.send_message(
+                "Fights are not allowed in this channel. "
+                "Ask a server admin to update `/config allowed_channels`.",
+                ephemeral=True,
+            )
+            return
         plan = validate_fight_fields(
             opponent_id=opponent.id if opponent is not None else None,
             matchup=matchup,
@@ -1475,6 +1491,70 @@ class FightCog(commands.Cog):
             color=discord.Color.dark_gold(),
         )
         await interaction.response.send_message(embed=embed)
+
+
+    @app_commands.command(
+        name="config",
+        description="View or set Fight Club guild config (Manage Server)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(
+        key="Config key (omit to list all)",
+        value="New value (required when setting a key)",
+    )
+    async def config_cmd(
+        self,
+        interaction: discord.Interaction,
+        key: str | None = None,
+        value: str | None = None,
+    ) -> None:
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if perms is None or not getattr(perms, "manage_guild", False):
+            await interaction.response.send_message(
+                "Admin only — requires **Manage Server**.",
+                ephemeral=True,
+            )
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "`/config` is only available in a server.",
+                ephemeral=True,
+            )
+            return
+        db = get_db()
+        guild_id = int(interaction.guild_id)
+
+        if key is None:
+            lines = list_config_lines(db, guild_id)
+            body = "\n".join(lines)
+            embed = discord.Embed(
+                title="Fight Club config",
+                description=body,
+                color=discord.Color.dark_grey(),
+            )
+            embed.set_footer(text="Env default < guild override. Set with /config key value.")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        key = key.strip()
+        if value is None:
+            await interaction.response.send_message(
+                f"Provide a value to set `{key}`, or omit both args to list all keys.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            coerced = set_config(db, guild_id, key, value)
+        except ConfigError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        display = format_config_value(coerced, key)
+        await interaction.response.send_message(
+            f"Set `{key}` = {display}",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="laws", description="List the Laws of the Court")
     async def laws(self, interaction: discord.Interaction) -> None:

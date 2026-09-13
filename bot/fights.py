@@ -7,7 +7,6 @@ Do not rely on ``tasks.loop`` for correctness (amendment / C3).
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -98,82 +97,40 @@ def resolve_sides(matchup: str, side: str | None = None) -> tuple[str, str]:
 
 
 def challenge_timeout_hours(db: CourtDB, guild_id: int | None) -> float:
-    """guild_config override, else env, else 6h (§7)."""
-    if guild_id is not None:
-        raw = db.get_guild_config(guild_id, "challenge_timeout_hours")
-        if raw is not None and str(raw).strip():
-            try:
-                return float(raw)
-            except ValueError:
-                pass
-    env = os.getenv("FIGHT_CHALLENGE_TIMEOUT_HOURS")
-    if env is not None and str(env).strip():
-        try:
-            return float(env)
-        except ValueError:
-            pass
-    return DEFAULT_CHALLENGE_TIMEOUT_HOURS
+    """guild_config → env → 6h (§7)."""
+    from bot.config import get_guild_config
+
+    return float(get_guild_config(db, guild_id, "challenge_timeout_hours"))
 
 
 def counters_per_side(db: CourtDB, guild_id: int | None) -> int:
-    """guild_config override, else env, else 2 (§7)."""
-    if guild_id is not None:
-        raw = db.get_guild_config(guild_id, "counters_per_side")
-        if raw is not None and str(raw).strip():
-            try:
-                return max(0, int(raw))
-            except ValueError:
-                pass
-    env = os.getenv("FIGHT_COUNTERS_PER_SIDE")
-    if env is not None and str(env).strip():
-        try:
-            return max(0, int(env))
-        except ValueError:
-            pass
-    return DEFAULT_COUNTERS_PER_SIDE
+    """guild_config → env → 2 (§7)."""
+    from bot.config import get_guild_config
+
+    return max(0, int(get_guild_config(db, guild_id, "counters_per_side")))
 
 
 def _as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    s = str(value).strip().lower()
-    if s in {"1", "true", "yes", "on"}:
-        return True
-    if s in {"0", "false", "no", "off", ""}:
+    from bot.config import _as_bool as _cfg_bool
+
+    try:
+        return _cfg_bool(value)
+    except Exception:
         return False
-    return False
 
 
 def balance_warn_below(db: CourtDB | None, guild_id: int | None) -> float:
-    """guild_config override, else env, else 4 (§7). Score 1–10, 10=even."""
-    if db is not None and guild_id is not None:
-        raw = db.get_guild_config(guild_id, "balance_warn_below")
-        if raw is not None and str(raw).strip():
-            try:
-                return float(raw)
-            except ValueError:
-                pass
-    env = os.getenv("FIGHT_BALANCE_WARN_BELOW")
-    if env is not None and str(env).strip():
-        try:
-            return float(env)
-        except ValueError:
-            pass
-    return DEFAULT_BALANCE_WARN_BELOW
+    """guild_config → env → 4 (§7). Score 1–10, 10=even."""
+    from bot.config import get_guild_config
+
+    return float(get_guild_config(db, guild_id, "balance_warn_below"))
 
 
 def balance_free_counter_enabled(db: CourtDB | None, guild_id: int | None) -> bool:
-    """guild_config override, else env, else True (free counter when warned)."""
-    if db is not None and guild_id is not None:
-        raw = db.get_guild_config(guild_id, "balance_free_counter")
-        if raw is not None and str(raw).strip():
-            return _as_bool(raw)
-    env = os.getenv("FIGHT_BALANCE_FREE_COUNTER")
-    if env is not None and str(env).strip():
-        return _as_bool(env)
-    return DEFAULT_BALANCE_FREE_COUNTER
+    """guild_config → env → True (free counter when warned)."""
+    from bot.config import get_guild_config
+
+    return bool(get_guild_config(db, guild_id, "balance_free_counter"))
 
 
 def compute_expires_at(now: datetime | str, hours: float) -> str:
@@ -777,43 +734,20 @@ _ACTIVE_ARGUMENT_STATUSES = frozenset({"arguing", "resting"})
 
 
 def rest_timeout_hours(db: CourtDB, guild_id: int | None) -> float:
-    """guild_config override, else env, else 24h (§7)."""
-    if guild_id is not None:
-        raw = db.get_guild_config(guild_id, "rest_timeout_hours")
-        if raw is not None and str(raw).strip():
-            try:
-                return float(raw)
-            except ValueError:
-                pass
-    env = os.getenv("FIGHT_REST_TIMEOUT_HOURS")
-    if env is not None and str(env).strip():
-        try:
-            return float(env)
-        except ValueError:
-            pass
-    return DEFAULT_REST_TIMEOUT_HOURS
+    """guild_config → env → 24h (§7)."""
+    from bot.config import get_guild_config
+
+    return float(get_guild_config(db, guild_id, "rest_timeout_hours"))
 
 
 def thread_archive_delay_hours(db: CourtDB, guild_id: int | None) -> float:
     """Hours after ruled_at before the fight thread should archive (§7 / item 8).
 
-    guild_config ``thread_archive_delay_hours``, else env
-    ``FIGHT_THREAD_ARCHIVE_DELAY_HOURS``, else 24h.
+    guild_config ``thread_archive_delay_hours`` → env → 24h.
     """
-    if guild_id is not None:
-        raw = db.get_guild_config(guild_id, "thread_archive_delay_hours")
-        if raw is not None and str(raw).strip():
-            try:
-                return float(raw)
-            except ValueError:
-                pass
-    env = os.getenv("FIGHT_THREAD_ARCHIVE_DELAY_HOURS")
-    if env is not None and str(env).strip():
-        try:
-            return float(env)
-        except ValueError:
-            pass
-    return DEFAULT_THREAD_ARCHIVE_DELAY_HOURS
+    from bot.config import get_guild_config
+
+    return float(get_guild_config(db, guild_id, "thread_archive_delay_hours"))
 
 
 def mark_judge_ready(

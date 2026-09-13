@@ -408,6 +408,13 @@ class CourtDB:
         ).fetchone()
         return self._row_to_fight(row) if row else None
 
+    def get_fight_by_thread(self, thread_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM fights WHERE thread_id = ? ORDER BY id DESC LIMIT 1",
+            (int(thread_id),),
+        ).fetchone()
+        return self._row_to_fight(row) if row else None
+
     def list_fights(
         self,
         *,

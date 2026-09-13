@@ -168,5 +168,33 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     per-side retrieves sharing the wall clock (each call still parallelizes
     sources). Unmapped both → `unlisted`.
 
-38. **Out of scope this commit** — `/rest` `/forfeit` `/cancel` (6); transcript
-    / exhibit extraction / contest (7); ruling drop (8+).
+38. **Out of scope in item 5** — completed by item 6 / pending 7–8 as noted below.
+
+## V2 item 6 (rest / forfeit / cancel) — Sept 13 2026
+
+39. **Judge-ready signal for item 8** — status becomes **`judge_ready`**
+    (constant `JUDGE_READY_STATUS`). No Sonnet / `judge()` call in item 6.
+    `mark_judge_ready(db, fight_id)` is idempotent (returns True only on the
+    first transition) so A3 near-simultaneous `/rest` cannot double-invoke.
+    Item 8 should consume rows with `status='judge_ready'`.
+
+40. **`judge_due_rests(now)`** — pure helper alongside `expire_due_fights`
+    (amendment 9). Resting fights with `rest_deadline_at <= now` →
+    `judge_ready` once. `sweep_deadlines` runs both at `/rest` `/forfeit`
+    `/cancel` and at challenge-card / `/fight` entry. Tests freeze the clock;
+    no `tasks.loop` required.
+
+41. **`/rest`** — advocate + in-thread only. First rest → `resting`, set
+    `rest_a_at`/`rest_b_at`, `rest_deadline_at = now + rest_timeout` (default
+    24h via `FIGHT_REST_TIMEOUT_HOURS` / guild_config). Second rest (other
+    side) → `judge_ready` once. Empty rest allowed (amendment 7); thin-record
+    banner is item 8.
+
+42. **`/forfeit`** — advocate + in-thread; ephemeral Confirm button →
+    `forfeited`. No `fights.winner_*` columns (item 2); item 9 derives the L.
+
+43. **`/cancel`** — advocate + in-thread handshake via `cancel_requested_by`;
+    other side confirms → `voided`.
+
+44. **Out of scope this commit** — transcript / exhibits / contest (7);
+    ruling call/drop / thin-record banner (8); records derivation (9).

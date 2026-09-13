@@ -21,10 +21,13 @@ from bot.db import get_db
 from bot.embeds import challenge_card_embed, verdict_embed
 from bot.export import export_markdown
 from bot.fights import (
+    JUDGE_READY_STATUS,
     MISSING_FIGHT_PROMPT,
     accept_fight,
+    actor_advocate_side,
     apply_balance_to_fight,
     button_holder_id,
+    cancel_fight,
     counter_button_label,
     counter_fight,
     create_proposed_fight,
@@ -32,9 +35,13 @@ from bot.fights import (
     expire_due_fights,
     fetch_and_store_accept_receipts,
     fill_open_ended_accept,
+    forfeit_fight,
     format_opening_message,
     is_balance_free_counter_eligible,
+    judge_due_rests,
+    rest_fight,
     sides_complete,
+    sweep_deadlines,
     utc_now,
     validate_fight_fields,
 )
@@ -430,7 +437,7 @@ class ChallengeCardView(discord.ui.View):
         self.add_item(counter)
 
     async def on_accept(self, interaction: discord.Interaction) -> None:
-        expire_due_fights(get_db(), utc_now())
+        sweep_deadlines(get_db(), utc_now())
         fight_id = self.fight_id
         fight = get_db().get_fight(fight_id)
         if fight is None:
@@ -450,7 +457,7 @@ class ChallengeCardView(discord.ui.View):
         await _complete_accept(interaction, fight_id, actor_id=interaction.user.id)
 
     async def on_decline(self, interaction: discord.Interaction) -> None:
-        expire_due_fights(get_db(), utc_now())
+        sweep_deadlines(get_db(), utc_now())
         fight_id = self.fight_id
         try:
             fight = decline_fight(
@@ -471,7 +478,7 @@ class ChallengeCardView(discord.ui.View):
         )
 
     async def on_counter(self, interaction: discord.Interaction) -> None:
-        expire_due_fights(get_db(), utc_now())
+        sweep_deadlines(get_db(), utc_now())
         fight = get_db().get_fight(self.fight_id)
         if fight is None:
             await interaction.response.send_message("Fight not found.", ephemeral=True)
@@ -622,6 +629,80 @@ async def _create_argument_thread(
     return tid
 
 
+
+def _channel_is_thread(channel: Any) -> bool:
+    """True for Discord threads (and MagicMock threads that set ``type``)."""
+    if channel is None:
+        return False
+    if isinstance(channel, discord.Thread):
+        return True
+    ctype = getattr(channel, "type", None)
+    thread_types = {
+        discord.ChannelType.public_thread,
+        discord.ChannelType.private_thread,
+    }
+    news = getattr(discord.ChannelType, "news_thread", None)
+    if news is not None:
+        thread_types.add(news)
+    return ctype in thread_types
+
+
+def _fight_from_thread(interaction: discord.Interaction) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve the in-thread fight, or return (None, ephemeral error)."""
+    channel = interaction.channel
+    if not _channel_is_thread(channel):
+        return None, "Use this command inside the fight's argument thread."
+    thread_id = getattr(channel, "id", None)
+    if thread_id is None:
+        return None, "Use this command inside the fight's argument thread."
+    fight = get_db().get_fight_by_thread(int(thread_id))
+    if fight is None:
+        return None, "No fight is linked to this thread."
+    return fight, None
+
+
+class ForfeitConfirmView(discord.ui.View):
+    """Ephemeral confirm button for ``/forfeit`` (not persistent)."""
+
+    def __init__(self, fight_id: int, actor_id: int) -> None:
+        super().__init__(timeout=120)
+        self.fight_id = int(fight_id)
+        self.actor_id = int(actor_id)
+
+    @discord.ui.button(
+        label="Confirm forfeit",
+        style=discord.ButtonStyle.danger,
+    )
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if int(interaction.user.id) != self.actor_id:
+            await interaction.response.send_message(
+                "Only the advocate who started /forfeit can confirm.",
+                ephemeral=True,
+            )
+            return
+        sweep_deadlines(get_db(), utc_now())
+        try:
+            fight = forfeit_fight(
+                get_db(),
+                self.fight_id,
+                now=utc_now(),
+                actor_id=interaction.user.id,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.edit_message(
+            content=(
+                f"Forfeited — fight **forfeited** (you take the L). "
+                f"Status `{fight['status']}`."
+            ),
+            view=None,
+        )
+
+
 class FightCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -709,7 +790,7 @@ class FightCog(commands.Cog):
         franchise: str | None = None,
         exhibits: str | None = None,
     ) -> None:
-        expire_due_fights(get_db(), utc_now())
+        sweep_deadlines(get_db(), utc_now())
         plan = validate_fight_fields(
             opponent_id=opponent.id if opponent is not None else None,
             matchup=matchup,
@@ -807,6 +888,94 @@ class FightCog(commands.Cog):
             fighter_a=fa, fighter_b=fb, context=plan.context, verdict=verdict,
             parent_ruling_id=None,
         )
+
+    @app_commands.command(name="rest", description="Rest your case (advocates, fight thread only)")
+    async def rest_cmd(self, interaction: discord.Interaction) -> None:
+        sweep_deadlines(get_db(), utc_now())
+        fight, err = _fight_from_thread(interaction)
+        if err or fight is None:
+            await interaction.response.send_message(err or "Fight not found.", ephemeral=True)
+            return
+        try:
+            out = rest_fight(
+                get_db(),
+                int(fight["id"]),
+                now=utc_now(),
+                actor_id=interaction.user.id,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        if out["status"] == JUDGE_READY_STATUS:
+            msg = (
+                "Both sides rested (or rest complete) — fight is **judge_ready**. "
+                "Ruling drop is next (item 8)."
+            )
+        elif out.get("rest_a_at") and not out.get("rest_b_at"):
+            msg = (
+                "Side A rested — status **resting**. "
+                f"Other side has until `{out.get('rest_deadline_at')}` "
+                "(or `/rest`) before judge-ready."
+            )
+        elif out.get("rest_b_at") and not out.get("rest_a_at"):
+            msg = (
+                "Side B rested — status **resting**. "
+                f"Other side has until `{out.get('rest_deadline_at')}` "
+                "(or `/rest`) before judge-ready."
+            )
+        else:
+            msg = f"Rested — status **{out['status']}**."
+        await interaction.response.send_message(msg)
+
+    @app_commands.command(name="forfeit", description="Forfeit the fight (advocates, fight thread only)")
+    async def forfeit_cmd(self, interaction: discord.Interaction) -> None:
+        sweep_deadlines(get_db(), utc_now())
+        fight, err = _fight_from_thread(interaction)
+        if err or fight is None:
+            await interaction.response.send_message(err or "Fight not found.", ephemeral=True)
+            return
+        if actor_advocate_side(fight, interaction.user.id) is None:
+            await interaction.response.send_message(
+                "Only advocates can /forfeit.", ephemeral=True
+            )
+            return
+        if fight["status"] not in {"arguing", "resting"}:
+            await interaction.response.send_message(
+                f"Cannot forfeit a fight in status={fight['status']!r}.",
+                ephemeral=True,
+            )
+            return
+        view = ForfeitConfirmView(int(fight["id"]), interaction.user.id)
+        await interaction.response.send_message(
+            "Confirm forfeit? You take the L. This cannot be undone.",
+            view=view,
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="cancel", description="Request mutual cancel (advocates, fight thread only)")
+    async def cancel_cmd(self, interaction: discord.Interaction) -> None:
+        sweep_deadlines(get_db(), utc_now())
+        fight, err = _fight_from_thread(interaction)
+        if err or fight is None:
+            await interaction.response.send_message(err or "Fight not found.", ephemeral=True)
+            return
+        try:
+            out = cancel_fight(
+                get_db(),
+                int(fight["id"]),
+                now=utc_now(),
+                actor_id=interaction.user.id,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        if out["status"] == "voided":
+            msg = "Both advocates agreed — fight **voided**."
+        else:
+            msg = (
+                "Cancel requested. Waiting for the other advocate to `/cancel`."
+            )
+        await interaction.response.send_message(msg)
 
     @app_commands.command(name="export", description="Export a ruling as a markdown block for paste-anywhere")
     @app_commands.describe(message_id="Discord message ID of the ruling (default: reply/reference or latest you can see)")

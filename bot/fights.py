@@ -1,4 +1,4 @@
-"""V2 fight helpers — deadlines, Accept/Decline/Counter, balance, accept receipts (4a–5).
+"""V2 fight helpers — deadlines, Accept/Decline/Counter, rest/forfeit/cancel (4a–6).
 
 Pure functions take an explicit ``now`` so tests can freeze the clock.
 Do not rely on ``tasks.loop`` for correctness (amendment / C3).
@@ -759,3 +759,204 @@ def create_proposed_fight(
     fight = db.get_fight(fight_id)
     assert fight is not None
     return fight
+
+
+# --- Item 6: rest / forfeit / cancel / rest-deadline sweep -------------------
+
+DEFAULT_REST_TIMEOUT_HOURS = 24.0
+
+# Status marker consumed by item 8 (ruling call). Do not invoke Sonnet here.
+JUDGE_READY_STATUS = "judge_ready"
+
+# Argument-phase statuses that allow rest / forfeit / cancel.
+_ACTIVE_ARGUMENT_STATUSES = frozenset({"arguing", "resting"})
+
+
+def rest_timeout_hours(db: CourtDB, guild_id: int | None) -> float:
+    """guild_config override, else env, else 24h (§7)."""
+    if guild_id is not None:
+        raw = db.get_guild_config(guild_id, "rest_timeout_hours")
+        if raw is not None and str(raw).strip():
+            try:
+                return float(raw)
+            except ValueError:
+                pass
+    env = os.getenv("FIGHT_REST_TIMEOUT_HOURS")
+    if env is not None and str(env).strip():
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return DEFAULT_REST_TIMEOUT_HOURS
+
+
+def mark_judge_ready(db: CourtDB, fight_id: int) -> bool:
+    """Transition once to ``judge_ready`` for item 8 (A3 — no double invoke).
+
+    Returns True only on the first transition. Safe under near-simultaneous
+    ``/rest`` calls: a second caller sees status already ``judge_ready`` and
+    returns False. Does **not** call the judge model.
+    """
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        return False
+    status = fight.get("status")
+    if status == JUDGE_READY_STATUS:
+        return False
+    if status not in _ACTIVE_ARGUMENT_STATUSES:
+        return False
+    db.update_fight(int(fight_id), status=JUDGE_READY_STATUS)
+    return True
+
+
+def judge_due_rests(db: CourtDB, now: datetime | str) -> list[int]:
+    """Mark ``resting`` fights past ``rest_deadline_at`` as ``judge_ready`` once.
+
+    Pure deadline helper (amendment 9 / C3). Pair with ``expire_due_fights``.
+    Returns fight ids that newly entered ``judge_ready``.
+    """
+    now_dt = as_datetime(now)
+    now_iso = to_iso(now_dt)
+    ready_ids: list[int] = []
+    for fight in db.list_fights(status="resting"):
+        deadline = fight.get("rest_deadline_at")
+        if not deadline:
+            continue
+        dl_dt = parse_iso(str(deadline))
+        if dl_dt is None:
+            due = str(deadline) <= now_iso
+        else:
+            due = dl_dt <= now_dt
+        if due and mark_judge_ready(db, int(fight["id"])):
+            ready_ids.append(int(fight["id"]))
+    return ready_ids
+
+
+def sweep_deadlines(db: CourtDB, now: datetime | str) -> dict[str, list[int]]:
+    """Run both pure deadline helpers. Call at interaction entry points."""
+    return {
+        "expired": expire_due_fights(db, now),
+        "judge_ready": judge_due_rests(db, now),
+    }
+
+
+def both_sides_rested(fight: dict[str, Any]) -> bool:
+    return bool(fight.get("rest_a_at")) and bool(fight.get("rest_b_at"))
+
+
+def rest_fight(
+    db: CourtDB,
+    fight_id: int,
+    *,
+    now: datetime | str,
+    actor_id: int,
+) -> dict[str, Any]:
+    """Advocate ``/rest`` (amendment 7: empty rest allowed — no message check).
+
+    First rest → ``resting`` + ``rest_*_at`` + ``rest_deadline_at``.
+    Second rest (other side) or both already rested → ``judge_ready`` once (A3).
+    """
+    sweep_deadlines(db, now)
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        raise ValueError("Fight not found.")
+    if fight["status"] == JUDGE_READY_STATUS:
+        return fight
+    if fight["status"] not in _ACTIVE_ARGUMENT_STATUSES:
+        raise ValueError(f"Cannot rest a fight in status={fight['status']!r}.")
+    side = actor_advocate_side(fight, actor_id)
+    if side is None:
+        raise ValueError("Only advocates can /rest.")
+
+    now_iso = to_iso(as_datetime(now))
+    fields: dict[str, Any] = {}
+    if side == "a":
+        if fight.get("rest_a_at"):
+            raise ValueError("You already rested.")
+        fields["rest_a_at"] = now_iso
+    else:
+        if fight.get("rest_b_at"):
+            raise ValueError("You already rested.")
+        fields["rest_b_at"] = now_iso
+
+    if fight["status"] == "arguing":
+        fields["status"] = "resting"
+        hours = rest_timeout_hours(
+            db, int(fight["guild_id"]) if fight.get("guild_id") is not None else None
+        )
+        fields["rest_deadline_at"] = compute_expires_at(now, hours)
+    elif fight["status"] == "resting" and not fight.get("rest_deadline_at"):
+        hours = rest_timeout_hours(
+            db, int(fight["guild_id"]) if fight.get("guild_id") is not None else None
+        )
+        fields["rest_deadline_at"] = compute_expires_at(now, hours)
+
+    db.update_fight(fight_id, **fields)
+    fight = db.get_fight(fight_id)
+    assert fight is not None
+
+    # A3: both sides rested → single judge-ready transition (no Sonnet call).
+    if both_sides_rested(fight):
+        mark_judge_ready(db, fight_id)
+        fight = db.get_fight(fight_id)
+        assert fight is not None
+    return fight
+
+
+def forfeit_fight(
+    db: CourtDB,
+    fight_id: int,
+    *,
+    now: datetime | str,
+    actor_id: int,
+) -> dict[str, Any]:
+    """Advocate forfeit → ``forfeited``.
+
+    Winner / L for the forfeiter is derived in item 9 (no fights.winner_*
+    columns in the item 2 schema). Caller already verified advocate + confirm.
+    """
+    sweep_deadlines(db, now)
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        raise ValueError("Fight not found.")
+    if fight["status"] not in _ACTIVE_ARGUMENT_STATUSES:
+        raise ValueError(f"Cannot forfeit a fight in status={fight['status']!r}.")
+    if actor_advocate_side(fight, actor_id) is None:
+        raise ValueError("Only advocates can /forfeit.")
+
+    db.update_fight(fight_id, status="forfeited")
+    out = db.get_fight(fight_id)
+    assert out is not None
+    return out
+
+
+def cancel_fight(
+    db: CourtDB,
+    fight_id: int,
+    *,
+    now: datetime | str,
+    actor_id: int,
+) -> dict[str, Any]:
+    """Cancel handshake: first advocate sets ``cancel_requested_by``; other → ``voided``."""
+    sweep_deadlines(db, now)
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        raise ValueError("Fight not found.")
+    if fight["status"] not in _ACTIVE_ARGUMENT_STATUSES:
+        raise ValueError(f"Cannot cancel a fight in status={fight['status']!r}.")
+    side = actor_advocate_side(fight, actor_id)
+    if side is None:
+        raise ValueError("Only advocates can /cancel.")
+
+    requested = fight.get("cancel_requested_by")
+    if requested is None:
+        db.update_fight(fight_id, cancel_requested_by=int(actor_id))
+    elif int(requested) == int(actor_id):
+        raise ValueError(
+            "You already requested cancel. Waiting for the other advocate."
+        )
+    else:
+        db.update_fight(fight_id, status="voided")
+    out = db.get_fight(fight_id)
+    assert out is not None
+    return out

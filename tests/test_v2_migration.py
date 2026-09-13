@@ -78,6 +78,7 @@ _FIGHT_COLS = {
     "ruled_at",
     "archive_at",
     "season_id",
+    "transcript_snapshot",
 }
 
 _EXHIBIT_COLS = {

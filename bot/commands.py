@@ -20,6 +20,7 @@ from bot.budget import (
 from bot.db import get_db
 from bot.embeds import challenge_card_embed, verdict_embed
 from bot.export import export_markdown
+from bot.exhibits import contest_exhibits_on_message, prepare_judge_materials
 from bot.fights import (
     JUDGE_READY_STATUS,
     MISSING_FIGHT_PROMPT,
@@ -703,6 +704,47 @@ class ForfeitConfirmView(discord.ui.View):
         )
 
 
+
+def _attachment_to_dict(att: Any) -> dict[str, Any]:
+    return {
+        "id": getattr(att, "id", None),
+        "url": getattr(att, "url", None),
+        "filename": getattr(att, "filename", None),
+        "content_type": getattr(att, "content_type", None),
+    }
+
+
+def message_to_dict(msg: Any) -> dict[str, Any]:
+    """Normalize a Discord message (or message-like) for transcript/exhibits."""
+    if isinstance(msg, dict):
+        return msg
+    author = getattr(msg, "author", None)
+    author_id = getattr(author, "id", None) if author is not None else None
+    attachments = [
+        _attachment_to_dict(a) for a in (getattr(msg, "attachments", None) or [])
+    ]
+    return {
+        "id": getattr(msg, "id", None),
+        "author_id": author_id,
+        "content": getattr(msg, "content", None) or "",
+        "attachments": attachments,
+    }
+
+
+async def fetch_thread_message_dicts(channel: Any, *, limit: int = 500) -> list[dict[str, Any]]:
+    """Pull thread history newest-last → chronological message-like dicts."""
+    if channel is None or not hasattr(channel, "history"):
+        return []
+    collected: list[Any] = []
+    try:
+        async for msg in channel.history(limit=limit, oldest_first=True):
+            collected.append(msg)
+    except Exception as e:
+        log.warning("thread history fetch failed: %s", e)
+        return []
+    return [message_to_dict(m) for m in collected]
+
+
 class FightCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -710,6 +752,32 @@ class FightCog(commands.Cog):
 
     def cog_unload(self) -> None:
         self.rejudge_loop.cancel()
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        """Opposing advocate ❌ on an advocate message → contested exhibits."""
+        # Spec: ❌ only (U+274C CROSS MARK).
+        name = getattr(payload.emoji, "name", None) or str(payload.emoji)
+        if str(payload.emoji) != "\u274c" and name != "\u274c" and str(payload.emoji) != "❌":
+            if name != "❌":
+                return
+        if payload.user_id == getattr(self.bot.user, "id", None):
+            return
+        db = get_db()
+        fight = db.get_fight_by_thread(int(payload.channel_id))
+        if fight is None:
+            return
+        if fight.get("status") not in {"arguing", "resting", JUDGE_READY_STATUS, "ruled"}:
+            return
+        try:
+            contest_exhibits_on_message(
+                db,
+                fight,
+                message_id=int(payload.message_id),
+                reactor_id=int(payload.user_id),
+            )
+        except Exception as e:
+            log.warning("contest reaction failed: %s", e)
 
     @tasks.loop(minutes=15)
     async def rejudge_loop(self) -> None:
@@ -907,6 +975,14 @@ class FightCog(commands.Cog):
             await interaction.response.send_message(str(e), ephemeral=True)
             return
         if out["status"] == JUDGE_READY_STATUS:
+            # Item 7: snapshot + exhibits from live thread history (sole authority after store).
+            if out.get("transcript_snapshot") is None:
+                msgs = await fetch_thread_message_dicts(interaction.channel)
+                try:
+                    prepare_judge_materials(get_db(), int(out["id"]), msgs)
+                    out = get_db().get_fight(int(out["id"])) or out
+                except Exception as e:
+                    log.warning("judge_ready staging failed for fight %s: %s", out.get("id"), e)
             msg = (
                 "Both sides rested (or rest complete) — fight is **judge_ready**. "
                 "Ruling drop is next (item 8)."

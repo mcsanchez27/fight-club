@@ -1,4 +1,5 @@
-"""V2 fight helpers — deadlines, Accept/Decline/Counter, rest/forfeit/cancel (4a–6).
+"""V2 fight helpers — deadlines, Accept/Decline/Counter, rest/forfeit/cancel,
+transcript/exhibit staging at judge_ready (4a–7).
 
 Pure functions take an explicit ``now`` so tests can freeze the clock.
 Do not rely on ``tasks.loop`` for correctness (amendment / C3).
@@ -790,12 +791,22 @@ def rest_timeout_hours(db: CourtDB, guild_id: int | None) -> float:
     return DEFAULT_REST_TIMEOUT_HOURS
 
 
-def mark_judge_ready(db: CourtDB, fight_id: int) -> bool:
+def mark_judge_ready(
+    db: CourtDB,
+    fight_id: int,
+    messages: list | None = None,
+    *,
+    fetch_url=None,
+    max_tokens: int | None = None,
+) -> bool:
     """Transition once to ``judge_ready`` for item 8 (A3 — no double invoke).
 
     Returns True only on the first transition. Safe under near-simultaneous
     ``/rest`` calls: a second caller sees status already ``judge_ready`` and
     returns False. Does **not** call the judge model.
+
+    When ``messages`` is provided on the first transition, builds and stores
+    the transcript snapshot + exhibit ledger (item 7) for item 8 to consume.
     """
     fight = db.get_fight(fight_id)
     if fight is None:
@@ -806,6 +817,16 @@ def mark_judge_ready(db: CourtDB, fight_id: int) -> bool:
     if status not in _ACTIVE_ARGUMENT_STATUSES:
         return False
     db.update_fight(int(fight_id), status=JUDGE_READY_STATUS)
+    if messages is not None:
+        from bot.exhibits import prepare_judge_materials
+
+        prepare_judge_materials(
+            db,
+            int(fight_id),
+            messages,
+            fetch_url=fetch_url,
+            max_tokens=max_tokens,
+        )
     return True
 
 
@@ -850,11 +871,15 @@ def rest_fight(
     *,
     now: datetime | str,
     actor_id: int,
+    messages: list | None = None,
+    fetch_url=None,
 ) -> dict[str, Any]:
     """Advocate ``/rest`` (amendment 7: empty rest allowed — no message check).
 
     First rest → ``resting`` + ``rest_*_at`` + ``rest_deadline_at``.
     Second rest (other side) or both already rested → ``judge_ready`` once (A3).
+    When transitioning to judge_ready, optional ``messages`` stage transcript
+    + exhibits (item 7).
     """
     sweep_deadlines(db, now)
     fight = db.get_fight(fight_id)
@@ -897,7 +922,13 @@ def rest_fight(
 
     # A3: both sides rested → single judge-ready transition (no Sonnet call).
     if both_sides_rested(fight):
-        mark_judge_ready(db, fight_id)
+        # Only pass item-7 kwargs when provided (keeps item-6 patches working).
+        ready_kw: dict[str, Any] = {}
+        if messages is not None:
+            ready_kw["messages"] = messages
+        if fetch_url is not None:
+            ready_kw["fetch_url"] = fetch_url
+        mark_judge_ready(db, fight_id, **ready_kw)
         fight = db.get_fight(fight_id)
         assert fight is not None
     return fight

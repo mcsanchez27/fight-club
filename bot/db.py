@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS fights (
     rest_deadline_at TEXT,
     ruled_at TEXT,
     archive_at TEXT,
-    season_id INTEGER
+    season_id INTEGER,
+    transcript_snapshot TEXT
 );
 
 CREATE TABLE IF NOT EXISTS exhibits (
@@ -221,6 +222,7 @@ _USAGE_V2_COLUMNS: tuple[tuple[str, str], ...] = (
 
 _FIGHTS_OPTIONAL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("retrieval_status", "TEXT"),
+    ("transcript_snapshot", "TEXT"),
 )
 
 
@@ -453,6 +455,8 @@ class CourtDB:
         for key, value in fields.items():
             if key in bool_cols and value is not None:
                 value = 1 if value else 0
+            if key == "transcript_snapshot" and value is not None and not isinstance(value, str):
+                value = json.dumps(value)
             cols.append(f"{key} = ?")
             vals.append(value)
         vals.append(fight_id)
@@ -507,6 +511,28 @@ class CourtDB:
             (fight_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def clear_fight_exhibits(self, fight_id: int) -> None:
+        self._conn.execute("DELETE FROM exhibits WHERE fight_id = ?", (fight_id,))
+        self._conn.commit()
+
+    def update_exhibits_status_for_message(
+        self,
+        fight_id: int,
+        message_id: int,
+        *,
+        status: str,
+    ) -> int:
+        """Set status for all exhibits on a fight message. Returns rows updated."""
+        cur = self._conn.execute(
+            """
+            UPDATE exhibits SET status = ?
+            WHERE fight_id = ? AND message_id = ?
+            """,
+            (status, fight_id, message_id),
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
 
     # --- receipts (accept-time, keyed by fight) ---------------------------
 
@@ -884,6 +910,12 @@ class CourtDB:
         for key in ("instant", "open_ended", "balance_warned", "underdog_accepted"):
             if key in d:
                 d[key] = bool(d[key] or 0)
+        snap = d.get("transcript_snapshot")
+        if isinstance(snap, str) and snap:
+            try:
+                d["transcript_snapshot"] = json.loads(snap)
+            except json.JSONDecodeError:
+                pass
         return d
 
 

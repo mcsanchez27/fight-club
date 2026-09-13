@@ -196,5 +196,29 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 43. **`/cancel`** — advocate + in-thread handshake via `cancel_requested_by`;
     other side confirms → `voided`.
 
-44. **Out of scope this commit** — transcript / exhibits / contest (7);
-    ruling call/drop / thin-record banner (8); records derivation (9).
+44. **Out of scope in item 6** — completed by item 7 / pending 8–9 as noted below.
+
+## V2 item 7 (transcript + exhibits + contest) — Sept 13 2026
+
+45. **`fights.transcript_snapshot`** — Additive nullable JSON column (ALTER via
+    `_FIGHTS_OPTIONAL_COLUMNS`). Staging for item 8: snapshot is built from live
+    Discord history at judge_ready, then is the **sole authority** (amendment 2 /
+    Q2). `schema_version` remains **2** (same pattern as item 5 receipts).
+    Ruling-row `transcript_snapshot` is still written by item 8 when the ruling
+    is inserted.
+
+46. **Middle truncation** — Cap at `transcript_max_tokens` (guild_config /
+    `FIGHT_TRANSCRIPT_MAX_TOKENS` / 20k). Drops middle messages per side evenly;
+    never the opening or closing message of a side. Token estimate = chars/4
+    (`budget.estimate_tokens`).
+
+47. **Exhibits** — Extract at judge-ready over advocate messages only (C4):
+    URLs → `link`, ≥8-word straight/curly quotes → `quote`, image attachments →
+    `image` (always unverified; ledger line only). Verification: allowlisted
+    link + mockable fetch → `verified` + `verified_url`; quote = normalized
+    substring hit against fight receipts (C1); else unverified. ❌ from the
+    opposing advocate marks exhibits on that message `contested`.
+
+48. **Out of scope this commit** — ruling call/drop / thin-record banner (8);
+    records derivation (9); Discord history fetch on rest-timeout sweep without
+    an interaction (item 8 should fetch if snapshot still null).

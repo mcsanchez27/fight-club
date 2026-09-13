@@ -714,6 +714,120 @@ def balance_read(
 judge_balance = balance_read
 
 
+def judge_with_materials(
+    *,
+    fight_setup: str = "",
+    receipts: str = "",
+    transcript: str = "",
+    exhibit_ledger: str = "",
+    prior_ruling: str = "",
+    user_msg: str | None = None,
+    client: Any | None = None,
+    model: str | None = None,
+    retrieval_result: RetrievalResult | None = None,
+) -> dict[str, Any]:
+    """V2 ruling call: referee template slots + deliver_verdict tool.
+
+    Mock ``client`` (object with ``messages.create``) in tests. When
+    ``retrieval_result`` is provided, applies Phase-3 guardrails (confidence
+    cap / citation merge). Never refuses for missing receipts (House Rule 3).
+    """
+    system = build_system_prompt(
+        fight_setup=fight_setup,
+        receipts=receipts,
+        transcript=transcript,
+        exhibit_ledger=exhibit_ledger,
+        prior_ruling=prior_ruling,
+    )
+    msg = user_msg or (
+        "Deliver the verdict for this fight by calling deliver_verdict once. "
+        "Steelman both sides before the ruling. Fill exhibit_ledger notes from "
+        "the provided ledger. Opening/close/argument_quality may be null if the "
+        "record is thin."
+    )
+    use_model = model or ruling_model()
+    anthropic_client = client if client is not None else None
+
+    def _call_anthropic(c: Any) -> tuple[dict[str, Any], dict[str, int]]:
+        try:
+            resp = c.messages.create(
+                model=use_model,
+                system=system,
+                messages=[{"role": "user", "content": msg}],
+                max_tokens=2048,
+                temperature=0.4,
+                tools=[DELIVER_VERDICT_TOOL],
+                tool_choice={"type": "tool", "name": "deliver_verdict"},
+            )
+        except Exception as e:
+            raise RuntimeError(f"Anthropic request failed: {e}") from e
+        return _extract_tool_verdict(resp), _usage_from_response(resp)
+
+    t_judge = time.monotonic()
+    if anthropic_client is not None or os.getenv("ANTHROPIC_API_KEY"):
+        c = anthropic_client if anthropic_client is not None else make_anthropic_client()
+        try:
+            verdict, usage = _call_anthropic(c)
+        except ValueError:
+            verdict, usage = _call_anthropic(c)
+    elif os.getenv("OPENAI_API_KEY"):
+        # Soft OpenAI path with the same filled template.
+        from openai import OpenAI
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        base_url = os.getenv("OPENAI_BASE_URL")
+        if base_url:
+            kwargs["base_url"] = base_url
+        oai = OpenAI(**kwargs)
+        oai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        oai_system = (
+            system
+            + "\nRespond with ONLY a single JSON object matching the deliver_verdict "
+            "fields (steelman before ruling). Include winner_side ('a'|'b') or winner; "
+            "opening/close/argument_quality may be null.\n"
+        )
+
+        def _oai() -> dict[str, Any]:
+            resp = oai.chat.completions.create(
+                model=oai_model,
+                messages=[
+                    {"role": "system", "content": oai_system},
+                    {"role": "user", "content": msg},
+                ],
+                temperature=0.4,
+                response_format={"type": "json_object"},
+            )
+            content = resp.choices[0].message.content or ""
+            return validate_verdict(json.loads(content))
+
+        try:
+            verdict = _oai()
+        except (ValueError, json.JSONDecodeError):
+            verdict = _oai()
+        usage = {"input_tokens": 0, "output_tokens": 0}
+    else:
+        raise RuntimeError(
+            "No LLM API key set. Set ANTHROPIC_API_KEY (preferred) or OPENAI_API_KEY. "
+            "Copy .env.example to .env and add your key."
+        )
+    judge_seconds = time.monotonic() - t_judge
+    usage_out = {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "retrieval_seconds": 0.0,
+        "judge_seconds": round(judge_seconds, 4),
+        "total_seconds": round(judge_seconds, 4),
+        "role": "ruling",
+        "model": use_model,
+    }
+    verdict = _attach_usage(verdict, usage_out)
+    if retrieval_result is not None:
+        guarded = apply_retrieval_guardrails(verdict, retrieval_result)
+        guarded["_usage"] = usage_out
+        return guarded
+    return verdict
+
 
 def judge(
     fighter_a: str,

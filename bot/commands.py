@@ -18,15 +18,17 @@ from bot.budget import (
     usage_from_verdict,
 )
 from bot.db import get_db
-from bot.embeds import challenge_card_embed, verdict_embed
+from bot.embeds import challenge_card_embed, ruling_drop_embed, verdict_embed
 from bot.export import export_markdown
 from bot.exhibits import contest_exhibits_on_message, prepare_judge_materials
 from bot.fights import (
     JUDGE_READY_STATUS,
     MISSING_FIGHT_PROMPT,
+    RULED_STATUS,
     accept_fight,
     actor_advocate_side,
     apply_balance_to_fight,
+    archive_due,
     button_holder_id,
     cancel_fight,
     counter_button_label,
@@ -45,6 +47,12 @@ from bot.fights import (
     sweep_deadlines,
     utc_now,
     validate_fight_fields,
+)
+from bot.ruling import (
+    display_name,
+    format_winner_one_liner,
+    jump_url,
+    rule_fight,
 )
 from bot.judge import judge
 from bot.limits import limiter
@@ -731,6 +739,76 @@ def message_to_dict(msg: Any) -> dict[str, Any]:
     }
 
 
+
+async def _archive_fight_thread(fight: dict[str, Any], bot: Any | None = None) -> None:
+    """Best-effort Discord thread archive for archive_due callback."""
+    thread_id = fight.get("thread_id")
+    if thread_id is None:
+        return
+    # Prefer bot.fetch_channel when available; otherwise no-op (tests mock archive_due).
+    if bot is None:
+        return
+    try:
+        channel = bot.get_channel(int(thread_id)) or await bot.fetch_channel(int(thread_id))
+    except Exception as e:
+        log.warning("archive fetch thread %s failed: %s", thread_id, e)
+        return
+    edit = getattr(channel, "edit", None)
+    if not callable(edit):
+        return
+    try:
+        await edit(archived=True)
+    except Exception as e:
+        log.warning("archive thread %s failed: %s", thread_id, e)
+        raise
+
+
+async def drop_ruling_messages(
+    *,
+    thread: Any,
+    parent_channel: Any,
+    result: dict[str, Any],
+    winner_display: str,
+) -> Any:
+    """Post full embed in thread + channel one-liner; stamp ruling message_id."""
+    fight = result["fight"]
+    verdict = result["verdict"]
+    embed = ruling_drop_embed(
+        verdict,
+        fight=fight,
+        thin_record=bool(result.get("thin_record")),
+        exhibit_ledger=result.get("exhibit_ledger"),
+    )
+    thread_msg = await thread.send(embed=embed)
+    ruling_id = result.get("ruling_id")
+    if ruling_id is not None:
+        try:
+            get_db().update_ruling(
+                int(ruling_id),
+                message_id=int(thread_msg.id),
+                channel_id=int(getattr(thread, "id", None) or fight.get("thread_id") or 0) or None,
+            )
+        except Exception as e:
+            log.warning("update ruling message_id failed: %s", e)
+    link = jump_url(
+        fight.get("guild_id"),
+        getattr(thread, "id", None) or fight.get("thread_id"),
+        getattr(thread_msg, "id", None),
+    )
+    one_liner = format_winner_one_liner(
+        winner_name=winner_display,
+        side_a=str(fight.get("side_a") or "?"),
+        side_b=str(fight.get("side_b") or "?"),
+        jump_link=link,
+    )
+    if parent_channel is not None and hasattr(parent_channel, "send"):
+        try:
+            await parent_channel.send(one_liner)
+        except Exception as e:
+            log.warning("channel one-liner failed: %s", e)
+    return thread_msg
+
+
 async def fetch_thread_message_dicts(channel: Any, *, limit: int = 500) -> list[dict[str, Any]]:
     """Pull thread history newest-last → chronological message-like dicts."""
     if channel is None or not hasattr(channel, "history"):
@@ -959,7 +1037,16 @@ class FightCog(commands.Cog):
 
     @app_commands.command(name="rest", description="Rest your case (advocates, fight thread only)")
     async def rest_cmd(self, interaction: discord.Interaction) -> None:
-        sweep_deadlines(get_db(), utc_now())
+        def _archive_cb(f: dict[str, Any]) -> None:
+            # Schedule is sync from sweep; archive best-effort via create_task when loop runs.
+            try:
+                asyncio.get_running_loop().create_task(
+                    _archive_fight_thread(f, self.bot)
+                )
+            except RuntimeError:
+                pass
+
+        sweep_deadlines(get_db(), utc_now(), archive_thread=_archive_cb)
         fight, err = _fight_from_thread(interaction)
         if err or fight is None:
             await interaction.response.send_message(err or "Fight not found.", ephemeral=True)
@@ -974,19 +1061,66 @@ class FightCog(commands.Cog):
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
-        if out["status"] == JUDGE_READY_STATUS:
-            # Item 7: snapshot + exhibits from live thread history (sole authority after store).
+        if out["status"] == JUDGE_READY_STATUS or out["status"] == RULED_STATUS:
+            # Item 8: ensure snapshot (one live fetch if null), then rule + drop.
+            if out["status"] == RULED_STATUS:
+                await interaction.response.send_message(
+                    "This fight is already **ruled**.", ephemeral=True
+                )
+                return
+            if not interaction.response.is_done():
+                await interaction.response.defer(thinking=True)
+            msgs = None
             if out.get("transcript_snapshot") is None:
                 msgs = await fetch_thread_message_dicts(interaction.channel)
-                try:
-                    prepare_judge_materials(get_db(), int(out["id"]), msgs)
-                    out = get_db().get_fight(int(out["id"])) or out
-                except Exception as e:
-                    log.warning("judge_ready staging failed for fight %s: %s", out.get("id"), e)
-            msg = (
-                "Both sides rested (or rest complete) — fight is **judge_ready**. "
-                "Ruling drop is next (item 8)."
-            )
+            await edit_deferred_progress(interaction, PROGRESS_JUDGING)
+            try:
+                result = await asyncio.to_thread(
+                    rule_fight,
+                    get_db(),
+                    int(out["id"]),
+                    now=utc_now(),
+                    messages=msgs,
+                )
+            except Exception as e:
+                await interaction.followup.send(f"Ruling failed: {e}", ephemeral=True)
+                return
+            if result.get("already_ruled"):
+                await interaction.followup.send("Already ruled — no double call.")
+                return
+            fight_row = result["fight"]
+            winner_side = (result.get("verdict") or {}).get("winner_side")
+            winner_name = "?"
+            if winner_side in {"a", "b"}:
+                adv_id = fight_row.get(f"advocate_{winner_side}_id")
+                # Prefer interaction guild member display name when available.
+                member = None
+                if adv_id is not None and interaction.guild is not None:
+                    member = interaction.guild.get_member(int(adv_id))
+                if member is not None:
+                    winner_name = display_name(member)
+                else:
+                    side_label = str(fight_row.get(f"side_{winner_side}") or winner_side.upper())
+                    winner_name = side_label
+            parent = getattr(interaction.channel, "parent", None)
+            try:
+                await drop_ruling_messages(
+                    thread=interaction.channel,
+                    parent_channel=parent,
+                    result=result,
+                    winner_display=winner_name,
+                )
+            except Exception as e:
+                log.warning("ruling drop failed: %s", e)
+                await interaction.followup.send(
+                    f"Ruled, but drop failed: {e}", ephemeral=True
+                )
+                return
+            note = "Ruling posted."
+            if result.get("thin_record"):
+                note += " Thin record banner applied."
+            await interaction.followup.send(note)
+            return
         elif out.get("rest_a_at") and not out.get("rest_b_at"):
             msg = (
                 "Side A rested — status **resting**. "

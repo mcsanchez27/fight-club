@@ -1,5 +1,5 @@
 """V2 fight helpers — deadlines, Accept/Decline/Counter, rest/forfeit/cancel,
-transcript/exhibit staging at judge_ready (4a–7).
+transcript/exhibit staging at judge_ready (4a–7), ruling archive sweep (8).
 
 Pure functions take an explicit ``now`` so tests can freeze the clock.
 Do not rely on ``tasks.loop`` for correctness (amendment / C3).
@@ -768,6 +768,9 @@ DEFAULT_REST_TIMEOUT_HOURS = 24.0
 
 # Status marker consumed by item 8 (ruling call). Do not invoke Sonnet here.
 JUDGE_READY_STATUS = "judge_ready"
+RULED_STATUS = "ruled"
+
+DEFAULT_THREAD_ARCHIVE_DELAY_HOURS = 24.0
 
 # Argument-phase statuses that allow rest / forfeit / cancel.
 _ACTIVE_ARGUMENT_STATUSES = frozenset({"arguing", "resting"})
@@ -789,6 +792,28 @@ def rest_timeout_hours(db: CourtDB, guild_id: int | None) -> float:
         except ValueError:
             pass
     return DEFAULT_REST_TIMEOUT_HOURS
+
+
+def thread_archive_delay_hours(db: CourtDB, guild_id: int | None) -> float:
+    """Hours after ruled_at before the fight thread should archive (§7 / item 8).
+
+    guild_config ``thread_archive_delay_hours``, else env
+    ``FIGHT_THREAD_ARCHIVE_DELAY_HOURS``, else 24h.
+    """
+    if guild_id is not None:
+        raw = db.get_guild_config(guild_id, "thread_archive_delay_hours")
+        if raw is not None and str(raw).strip():
+            try:
+                return float(raw)
+            except ValueError:
+                pass
+    env = os.getenv("FIGHT_THREAD_ARCHIVE_DELAY_HOURS")
+    if env is not None and str(env).strip():
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return DEFAULT_THREAD_ARCHIVE_DELAY_HOURS
 
 
 def mark_judge_ready(
@@ -853,11 +878,57 @@ def judge_due_rests(db: CourtDB, now: datetime | str) -> list[int]:
     return ready_ids
 
 
-def sweep_deadlines(db: CourtDB, now: datetime | str) -> dict[str, list[int]]:
-    """Run both pure deadline helpers. Call at interaction entry points."""
+def archive_due(
+    db: CourtDB,
+    now: datetime | str,
+    *,
+    archive_thread: Callable[[dict[str, Any]], Any] | None = None,
+) -> list[int]:
+    """Archive Discord threads for ``ruled`` fights past ``archive_at``.
+
+    Pure deadline helper (amendment 9 / C3) alongside ``expire_due_fights`` /
+    ``judge_due_rests``. ``archive_thread(fight)`` is mockable — typically
+    archives the Discord thread. On success (or when no callback), clears
+    ``archive_at`` so the fight is not returned again. Returns fight ids
+    processed.
+    """
+    now_dt = as_datetime(now)
+    now_iso = to_iso(now_dt)
+    done: list[int] = []
+    for fight in db.list_fights(status=RULED_STATUS):
+        aa = fight.get("archive_at")
+        if not aa:
+            continue
+        aa_dt = parse_iso(str(aa))
+        if aa_dt is None:
+            due = str(aa) <= now_iso
+        else:
+            due = aa_dt <= now_dt
+        if not due:
+            continue
+        fid = int(fight["id"])
+        if archive_thread is not None:
+            try:
+                archive_thread(fight)
+            except Exception:
+                # Leave archive_at set so a later sweep can retry.
+                continue
+        db.update_fight(fid, archive_at=None)
+        done.append(fid)
+    return done
+
+
+def sweep_deadlines(
+    db: CourtDB,
+    now: datetime | str,
+    *,
+    archive_thread: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, list[int]]:
+    """Run pure deadline helpers. Call at interaction entry points."""
     return {
         "expired": expire_due_fights(db, now),
         "judge_ready": judge_due_rests(db, now),
+        "archived": archive_due(db, now, archive_thread=archive_thread),
     }
 
 

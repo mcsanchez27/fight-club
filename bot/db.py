@@ -714,6 +714,39 @@ class CourtDB:
         ).fetchone()
         return self._row_to_ruling(row) if row else None
 
+    def get_latest_ruling_for_fight(self, fight_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM rulings
+            WHERE fight_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (int(fight_id),),
+        ).fetchone()
+        return self._row_to_ruling(row) if row else None
+
+    def update_ruling(self, ruling_id: int, **fields: Any) -> None:
+        """Patch ruling columns (e.g. message_id after Discord drop)."""
+        if not fields:
+            return
+        cols: list[str] = []
+        vals: list[Any] = []
+        for key, value in fields.items():
+            if key == "transcript_snapshot" and value is not None and not isinstance(value, str):
+                value = json.dumps(value)
+            if key == "verdict" and value is not None and not isinstance(value, str):
+                value = json.dumps(value)
+            if key == "voided" and value is not None:
+                value = 1 if value else 0
+            cols.append(f"{key} = ?")
+            vals.append(value)
+        vals.append(int(ruling_id))
+        self._conn.execute(
+            f"UPDATE rulings SET {', '.join(cols)} WHERE id = ?",
+            vals,
+        )
+        self._conn.commit()
+
     def list_guild_rulings(self, guild_id: int, limit: int = 10) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             """

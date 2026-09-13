@@ -222,3 +222,28 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 48. **Out of scope this commit** — ruling call/drop / thin-record banner (8);
     records derivation (9); Discord history fetch on rest-timeout sweep without
     an interaction (item 8 should fetch if snapshot still null).
+
+## V2 item 8 (ruling call + drop + archive) — Sept 13 2026
+
+49. **Snapshot-only judge** — `rule_fight` reads `fights.transcript_snapshot`
+    only (amendment 2). If null (rest-timeout without interaction), one Discord
+    history fetch builds + stores via `ensure_transcript_snapshot` /
+    `prepare_judge_materials`; afterward the stored snapshot is sole authority.
+
+50. **Receipts** — reuse fight-keyed accept rows; one short refresh when empty
+    or `retrieval_status` unavailable/unlisted/disabled (A2). Never refuses
+    (House Rule 3). Exhibit ledger loaded from DB into the referee template.
+
+51. **Ruling row** — `kind=initial`, nullable capture scores (amendment 11),
+    transcript_snapshot copy, winner_side / confidence / judge_model. Status
+    → `ruled` with `ruled_at` + `archive_at` = now + thread_archive_delay
+    (default 24h). Idempotent if already ruled.
+
+52. **Drop** — thread embed (`ruling_drop_embed`: steelmans, concessions,
+    exhibit ledger, ruling, winner, confidence, citations; thin-record banner
+    when either side <1 msg). Channel one-liner
+    `🏆 **Name** won *A vs B* — <jump>`. Progress "Judging…".
+
+53. **`archive_due(now)`** — pure helper for ruled fights past `archive_at`;
+    mockable `archive_thread` callback; included in `sweep_deadlines`.
+    `/reconsider` (10), `/config` (11), and leaderboard/flare (9) out of scope.

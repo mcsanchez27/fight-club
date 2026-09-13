@@ -206,3 +206,129 @@ def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
     embed.set_footer(text=footer)
     return embed
 
+
+
+THIN_RECORD_BANNER = "Thin record — ruled on available argument."
+
+
+def _format_exhibit_ledger_field(ledger: Any) -> str:
+    if ledger is None or ledger == "" or ledger == "(none)":
+        return "—"
+    if isinstance(ledger, list):
+        lines: list[str] = []
+        for item in ledger:
+            if isinstance(item, dict):
+                eid = item.get("exhibit_id") or item.get("id") or "?"
+                status = item.get("status") or "unverified"
+                note = item.get("weight_note") or ""
+                bit = f"E{eid}: {status}"
+                if note:
+                    bit += f" — {note}"
+                lines.append(bit)
+            else:
+                lines.append(str(item))
+        return _join_list(lines)
+    return str(ledger)
+
+
+def ruling_drop_embed(
+    v: dict[str, Any],
+    *,
+    fight: dict[str, Any] | None = None,
+    thin_record: bool = False,
+    exhibit_ledger: Any | None = None,
+) -> discord.Embed:
+    """Full thread ruling drop (item 8): steelmans → ledger → ruling → winner.
+
+    Field lengths clipped like V1 ``verdict_embed``. Optional thin-record banner
+    (Amendment 7) prepended to the description.
+    """
+    conf = float(v.get("confidence", 0) or 0)
+    status = v.get("retrieval_status")
+    unavailable = status in {"unavailable", "unlisted", "disabled"} or bool(
+        v.get("voided")
+    )
+    if unavailable:
+        color = discord.Color.dark_grey()
+    elif conf >= 7:
+        color = discord.Color.green()
+    elif conf >= 4:
+        color = discord.Color.gold()
+    else:
+        color = discord.Color.orange()
+
+    matchup = v.get("matchup")
+    if not matchup and fight:
+        matchup = f"{fight.get('side_a') or '?'} vs {fight.get('side_b') or '?'}"
+    matchup = matchup or "Matchup"
+
+    ruling_text = str(v.get("ruling", "") or "")
+    description = _clip(ruling_text, 3500)
+    banner = None
+    if thin_record or v.get("thin_record"):
+        banner = str(v.get("thin_record_banner") or THIN_RECORD_BANNER)
+        description = f"**{banner}**\n" + (description if description != "—" else "")
+    if unavailable:
+        description = (
+            "**unverified: retrieval unavailable**\n"
+            + (description if description != "—" else "")
+        )
+
+    embed = discord.Embed(
+        title=f"⚖ {_clip(str(matchup), 250)}",
+        description=_clip(description, 4000),
+        color=color,
+    )
+    embed.add_field(
+        name="Steelman A", value=_clip(str(v.get("steelman_a", ""))), inline=False
+    )
+    embed.add_field(
+        name="Steelman B", value=_clip(str(v.get("steelman_b", ""))), inline=False
+    )
+    embed.add_field(
+        name="Concessions",
+        value=_clip(_join_list(list(v.get("concessions") or []))),
+        inline=False,
+    )
+
+    ledger = exhibit_ledger
+    if ledger is None:
+        ledger = v.get("exhibit_ledger")
+    embed.add_field(
+        name="Exhibit ledger",
+        value=_clip(_format_exhibit_ledger_field(ledger)),
+        inline=False,
+    )
+
+    winner = None
+    if fight and v.get("winner_side") in {"a", "b"}:
+        winner = fight.get(f"side_{v['winner_side']}")
+    if not winner:
+        w = v.get("winner")
+        # Ignore bare V1 side letters when fight sides are known.
+        if w and not (fight and str(w).strip().lower() in {"a", "b"}):
+            winner = w
+    if not winner:
+        winner = v.get("winner") or v.get("winner_side") or "?"
+    embed.add_field(name="Winner", value=_clip(str(winner), 256), inline=True)
+    embed.add_field(name="Confidence", value=f"{conf}/10", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+    cites = v.get("citations") or []
+    cite_lines = [_format_citation(c) for c in cites]
+    embed.add_field(
+        name="Citations",
+        value=_clip(_join_list(cite_lines)),
+        inline=False,
+    )
+
+    footer_bits = ["Fight Club Court · initial ruling"]
+    if status:
+        footer_bits.append(f"receipts: {status}")
+    if banner:
+        footer_bits.append("thin record")
+    verified_n = sum(1 for c in cites if isinstance(c, dict) and c.get("verified"))
+    unverified_n = len(cites) - verified_n
+    footer_bits.append(f"✓{verified_n} ✗{unverified_n}")
+    embed.set_footer(text=" · ".join(footer_bits))
+    return embed

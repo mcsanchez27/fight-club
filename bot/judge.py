@@ -565,7 +565,6 @@ def _judge_anthropic(user_msg: str) -> dict[str, Any]:
                 system=build_system_prompt(),
                 messages=[{"role": "user", "content": user_msg}],
                 max_tokens=2048,
-                temperature=0.4,
                 tools=[DELIVER_VERDICT_TOOL],
                 tool_choice={"type": "tool", "name": "deliver_verdict"},
             )
@@ -690,7 +689,6 @@ def balance_read(
                 system=system,
                 messages=[{"role": "user", "content": user_msg}],
                 max_tokens=512,
-                temperature=0.2,
                 tools=[BALANCE_READ_TOOL],
                 tool_choice={"type": "tool", "name": "balance_read"},
             )
@@ -755,7 +753,6 @@ def judge_with_materials(
                 system=system,
                 messages=[{"role": "user", "content": msg}],
                 max_tokens=2048,
-                temperature=0.4,
                 tools=[DELIVER_VERDICT_TOOL],
                 tool_choice={"type": "tool", "name": "deliver_verdict"},
             )

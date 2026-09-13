@@ -324,4 +324,6 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 
 ## V2 follow-up F1 (Sonnet 5 migration check) — Sept 13 2026
 
-69. **Sonnet 5 API params** — Docs migration check (no live fight burn; `claude` CLI migrate not installed): `messages.create` + `deliver_verdict`/`balance_read` + `input_schema` + `tool_choice={"type":"tool","name":…}` + optional tool `"type":"custom"` + timeout/max_retries still valid. **Change required:** omit `temperature`/`top_p`/`top_k` on Anthropic calls (Sonnet 5 returns 400 for non-default sampling); our paths still pass `temperature=0.4` (ruling) / `0.2` (balance) — remove before live Sonnet 5 burns.
+69. **Sonnet 5 API params** — Docs migration check (no live fight burn; `claude` CLI migrate not installed): `messages.create` + `deliver_verdict`/`balance_read` + `input_schema` + `tool_choice={"type":"tool","name":…}` + optional tool `"type":"custom"` + timeout/max_retries still valid. **Omit now done in code:** Anthropic `messages.create` paths no longer pass `temperature`/`top_p`/`top_k` (Sonnet 5 returns 400 for non-default sampling); OpenAI JSON paths still use `temperature=0.4`.
+
+70. **sweep_interval_minutes** — Per-guild `/config` key exists, but the single bot background loop reads global/env via `get_guild_config(..., guild_id=None)`.

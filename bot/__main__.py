@@ -22,11 +22,23 @@ def main() -> int:
         return 1
 
     intents = discord.Intents.default()
+    # Privileged Message Content — required for fight-thread transcripts (amendment 13 / C7).
+    # Also enable Message Content Intent in the Discord Developer Portal.
+    intents.message_content = True
     bot = commands.Bot(command_prefix="!", intents=intents)
 
     @bot.event
     async def on_ready() -> None:
         print(f"Logged in as {bot.user} (id={bot.user.id if bot.user else '?'})")
+        if not bot.intents.message_content:
+            print(
+                "WARNING: Message Content intent is not enabled on this connection. "
+                "Enable Privileged Message Content in the Developer Portal "
+                "(Bot → Privileged Gateway Intents) and keep "
+                "Intents.message_content = True in bot/__main__.py. "
+                "Without it, thread transcript reading will fail.",
+                file=sys.stderr,
+            )
         try:
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} app command(s)")

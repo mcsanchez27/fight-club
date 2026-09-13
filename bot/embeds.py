@@ -106,14 +106,37 @@ def verdict_embed(v: dict[str, Any]) -> discord.Embed:
     return embed
 
 
-def balance_warning_field(fight: dict[str, Any]) -> tuple[str, str] | None:
-    """4c hook: return (name, value) for a balance warning field, or None.
+def _format_balance_score(score: Any) -> str:
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return "?"
+    if s == int(s):
+        return str(int(s))
+    return f"{s:.1f}"
 
-    4b stores balance scores on the fight after both sides are known but does
-    not render warning chrome yet.
+
+def balance_warning_field(fight: dict[str, Any]) -> tuple[str, str] | None:
+    """Return (name, value) for referee-read warning chrome, or None.
+
+    Shown only when ``balance_warned`` and both sides are known (A1).
+    Labeled as the referee's read — never a ruling.
     """
-    _ = fight
-    return None
+    if not fight or not fight.get("balance_warned"):
+        return None
+    from bot.fights import sides_complete
+
+    if not sides_complete(fight):
+        return None
+    score_s = _format_balance_score(fight.get("balance_score"))
+    favored = fight.get("balance_favored")
+    reason = str(fight.get("balance_reason") or "").strip() or "lopsided matchup"
+    if favored in {"a", "b"}:
+        name = str(fight.get(f"side_{favored}") or "").strip() or f"side {favored}"
+        value = f"{name} favored ({score_s}/10) — {reason}"
+    else:
+        value = f"even ({score_s}/10) — {reason}"
+    return ("⚖️ Referee's read", value)
 
 
 def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
@@ -167,7 +190,7 @@ def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
             value=f"A:{ca} · B:{cb}",
             inline=True,
         )
-    # 4c may add balance warning chrome via balance_warning_field.
+    # Balance warning chrome (referee's read; not a ruling).
     warn = balance_warning_field(fight)
     if warn is not None:
         embed.add_field(name=warn[0], value=_clip(warn[1]), inline=False)

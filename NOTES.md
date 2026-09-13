@@ -111,10 +111,41 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     known (A1); `apply_balance_to_fight` stores scores/franchises but does **not**
     post warning chrome (4c).
 
-27. **4c hooks** — `counter_button_label`, `is_balance_free_counter_eligible`,
-    `balance_warning_field`, and `count_against_limit=` on `counter_fight` are
-    stubs for free-counter labeling / quota skip. No free-counter exception yet.
+27. **4c hooks** — implemented in item 4c (`counter_button_label`,
+    `is_balance_free_counter_eligible`, `balance_warning_field`,
+    `count_against_limit=` / auto-detect on `counter_fight`).
 
-28. **Out of scope this commit** — 4c balance warning UI + free counter;
-    item 5 full thread receipts; `/config` wiring for counters (env/guild_config
-    helpers only).
+28. **Out of scope in 4b** — completed by 4c / pending item 5 as noted below.
+
+## V2 item 4c (balance warning + free counter) — Sept 13 2026
+
+29. **Threshold comparison** — `balance_warn_below` (guild_config, else
+    `FIGHT_BALANCE_WARN_BELOW`, else **4** from §7). Score is 1–10 with
+    **10 = even**. Warning when ``score < threshold`` (strict). Score **equal**
+    to the threshold is *not* a warning (even enough). Documented because
+    "below" vs "at or below" was ambiguous.
+
+30. **When balance runs** — only after both sides are known (lead lock A1).
+    Normal `/fight` matchup: at submit, then warning chrome on the public card.
+    Open-ended: deferred until Accept modal fills the champion, before the
+    thread opens. No one-sided score on the card. `apply_balance_to_fight`
+    stores `balance_score` / `balance_favored` / `balance_reason` /
+    `balance_warned` plus franchise keys via `normalize_franchise_key`.
+
+31. **Warning chrome** — field name `⚖️ Referee's read`, value
+    `{side} favored (N/10) — reason`. Labeled as the referee's read; never
+    a ruling. Hidden unless `balance_warned` and sides are complete.
+
+32. **Free counter** — when `balance_warned` and `balance_free_counter`
+    (guild_config / `FIGHT_BALANCE_FREE_COUNTER`, default **on**): button
+    label `Counter (free)` and `count_against_limit=False` so `counters_*`
+    do not increment. While still warned every such counter is free (no
+    one-shot column; a `free_counter_used` flag would need schema). Disable
+    per guild with `balance_free_counter=0`.
+
+33. **`underdog_accepted`** — set on Accept when the fight is
+    `balance_warned` and the accepting actor is the advocate of the
+    *unfavored* side (`balance_favored` is the favorite). Not a ruling.
+
+34. **Out of scope this commit** — item 5 thread receipts / retrieve-at-accept;
+    rest / judge drop; `/config` slash wiring (env + guild_config helpers only).

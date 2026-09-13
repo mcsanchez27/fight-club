@@ -218,7 +218,7 @@ def test_open_ended_accept_fills_side_b(tmp_path: Path) -> None:
     row = db.get_fight(fight["id"])
     assert row["balance_score"] == 7.0
     assert row["balance_favored"] == "b"
-    assert row["balance_warned"] is False  # chrome is 4c
+    assert row["balance_warned"] is False  # score 7 is not < default 4
 
     out = accept_fight(
         db, fight["id"], now=FROZEN + timedelta(minutes=1), actor_id=20, thread_id=42
@@ -231,8 +231,19 @@ def test_open_ended_accept_fills_side_b(tmp_path: Path) -> None:
 
 def test_counter_button_label_hook_and_free_flag() -> None:
     assert counter_button_label(None) == "Counter"
-    assert counter_button_label({"balance_warned": True}) == "Counter"
-    assert is_balance_free_counter_eligible({"balance_warned": True}) is False
+    assert counter_button_label({"balance_warned": False}) == "Counter"
+    # Explicit flag on the fight (no db) — 4c implements the hook.
+    assert (
+        counter_button_label({"balance_warned": True, "balance_free_counter": True})
+        == "Counter (free)"
+    )
+    assert is_balance_free_counter_eligible(
+        {"balance_warned": True, "balance_free_counter": True}
+    ) is True
+    assert is_balance_free_counter_eligible(
+        {"balance_warned": True, "balance_free_counter": False}
+    ) is False
+    assert is_balance_free_counter_eligible({"balance_warned": False}) is False
 
 
 def test_counter_and_open_ended_handlers_mocked(

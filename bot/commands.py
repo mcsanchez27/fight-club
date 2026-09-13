@@ -298,8 +298,9 @@ class CounterModal(discord.ui.Modal, title="Counter challenge"):
         matchup_val = (self.matchup.component.value or "").strip() or None  # type: ignore[union-attr]
         context_val = (self.context.component.value or "").strip() or None  # type: ignore[union-attr]
         swap_val = bool(self.swap.component.value)  # type: ignore[union-attr]
+        db = get_db()
         free = is_balance_free_counter_eligible(
-            get_db().get_fight(self.fight_id) or {}
+            db.get_fight(self.fight_id) or {}, db=db
         )
         try:
             fight = counter_fight(
@@ -326,7 +327,7 @@ class CounterModal(discord.ui.Modal, title="Counter challenge"):
             )
             return
 
-        # Re-run balance when both sides known (store only; warning chrome = 4c).
+        # Re-run balance when both sides known (warning chrome + free-counter label).
         if sides_complete(fight):
             try:
                 apply_balance_to_fight(get_db(), int(fight["id"]))
@@ -387,7 +388,7 @@ class OpenEndedAcceptModal(discord.ui.Modal, title="Name your champion"):
                 champion=champion,
                 context=context_val,
             )
-            # Balance only after both sides known (A1); no warning chrome in 4b.
+            # Balance only after both sides known (A1); warning chrome on card.
             try:
                 apply_balance_to_fight(get_db(), int(fight["id"]))
             except Exception as e:
@@ -407,7 +408,7 @@ class OpenEndedAcceptModal(discord.ui.Modal, title="Name your champion"):
 
 
 class ChallengeCardView(discord.ui.View):
-    """Persistent Accept / Decline / Counter card (4a + 4b)."""
+    """Persistent Accept / Decline / Counter card (4a–4c)."""
 
     def __init__(self, fight_id: int, *, counter_label: str | None = None) -> None:
         super().__init__(timeout=None)
@@ -422,8 +423,9 @@ class ChallengeCardView(discord.ui.View):
             style=discord.ButtonStyle.secondary,
             custom_id=f"fightclub:decline:{self.fight_id}",
         )
+        db = get_db()
         label = counter_label or counter_button_label(
-            get_db().get_fight(self.fight_id)
+            db.get_fight(self.fight_id), db=db
         )
         counter = discord.ui.Button(
             label=label,
@@ -458,7 +460,7 @@ class ChallengeCardView(discord.ui.View):
         try:
             # Thin thread stub (full receipts = item 5).
             thread_id = await _maybe_create_argument_thread(interaction, fight_id)
-            # Both sides known — optional balance store (warning UI = 4c).
+            # Both sides known — balance store + warning flag.
             if sides_complete(fight):
                 try:
                     apply_balance_to_fight(get_db(), fight_id)
@@ -688,7 +690,7 @@ class FightCog(commands.Cog):
                 now=utc_now(),
                 open_ended=plan.open_ended,
             )
-            # Balance only when both sides known (skip open-ended until Accept).
+            # Balance only when both sides known (skip open-ended until Accept modal).
             if sides_complete(fight):
                 try:
                     apply_balance_to_fight(get_db(), int(fight["id"]))

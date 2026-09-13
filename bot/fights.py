@@ -1,4 +1,4 @@
-"""V2 fight helpers — deadlines, Accept/Decline/Counter, open-ended (items 4a/4b).
+"""V2 fight helpers — deadlines, Accept/Decline/Counter, balance warning (items 4a–4c).
 
 Pure functions take an explicit ``now`` so tests can freeze the clock.
 Do not rely on ``tasks.loop`` for correctness (amendment / C3).
@@ -13,9 +13,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
 
 from bot.db import CourtDB
+from bot.sources import normalize_franchise_key
 
 DEFAULT_CHALLENGE_TIMEOUT_HOURS = 6.0
 DEFAULT_COUNTERS_PER_SIDE = 2
+DEFAULT_BALANCE_WARN_BELOW = 4.0
+DEFAULT_BALANCE_FREE_COUNTER = True
 _MATCHUP_SPLIT = re.compile(r"\s+vs\.?\s+", re.IGNORECASE)
 
 FightKind = Literal["proposed", "instant", "prompt"]
@@ -129,6 +132,49 @@ def counters_per_side(db: CourtDB, guild_id: int | None) -> int:
     return DEFAULT_COUNTERS_PER_SIDE
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "on"}:
+        return True
+    if s in {"0", "false", "no", "off", ""}:
+        return False
+    return False
+
+
+def balance_warn_below(db: CourtDB | None, guild_id: int | None) -> float:
+    """guild_config override, else env, else 4 (§7). Score 1–10, 10=even."""
+    if db is not None and guild_id is not None:
+        raw = db.get_guild_config(guild_id, "balance_warn_below")
+        if raw is not None and str(raw).strip():
+            try:
+                return float(raw)
+            except ValueError:
+                pass
+    env = os.getenv("FIGHT_BALANCE_WARN_BELOW")
+    if env is not None and str(env).strip():
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return DEFAULT_BALANCE_WARN_BELOW
+
+
+def balance_free_counter_enabled(db: CourtDB | None, guild_id: int | None) -> bool:
+    """guild_config override, else env, else True (free counter when warned)."""
+    if db is not None and guild_id is not None:
+        raw = db.get_guild_config(guild_id, "balance_free_counter")
+        if raw is not None and str(raw).strip():
+            return _as_bool(raw)
+    env = os.getenv("FIGHT_BALANCE_FREE_COUNTER")
+    if env is not None and str(env).strip():
+        return _as_bool(env)
+    return DEFAULT_BALANCE_FREE_COUNTER
+
+
 def compute_expires_at(now: datetime | str, hours: float) -> str:
     dt = as_datetime(now)
     return to_iso(dt + timedelta(hours=float(hours)))
@@ -158,25 +204,36 @@ def sides_complete(fight: dict[str, Any]) -> bool:
     return bool(a and str(a).strip()) and bool(b and str(b).strip())
 
 
-def counter_button_label(fight: dict[str, Any] | None = None) -> str:
+def counter_button_label(
+    fight: dict[str, Any] | None = None,
+    db: CourtDB | None = None,
+) -> str:
     """Label for the Counter button.
 
-    4c may switch to ``\"Counter (free)\"`` when ``balance_warned`` and
-    ``balance_free_counter`` apply; 4b always returns plain ``Counter``.
+    ``Counter (free)`` when ``balance_warned`` and ``balance_free_counter``.
     """
-    # Hook for 4c — inspect fight balance flags without changing 4b UX.
-    _ = fight  # reserved for balance_warned / free-counter labeling
+    if fight and is_balance_free_counter_eligible(fight, db=db):
+        return "Counter (free)"
     return "Counter"
 
 
-def is_balance_free_counter_eligible(fight: dict[str, Any]) -> bool:
-    """4c hook: True when a counter should not consume the per-side quota.
+def is_balance_free_counter_eligible(
+    fight: dict[str, Any],
+    db: CourtDB | None = None,
+) -> bool:
+    """True when a counter should not consume the per-side quota.
 
-    4b never treats a counter as free; 4c will gate on ``balance_warned`` and
-    guild ``balance_free_counter``.
+    Requires ``balance_warned`` and guild/env ``balance_free_counter``.
     """
-    _ = fight
-    return False
+    if not fight or not fight.get("balance_warned"):
+        return False
+    explicit = fight.get("balance_free_counter")
+    if explicit is not None and db is None:
+        return _as_bool(explicit)
+    guild_id = fight.get("guild_id")
+    return balance_free_counter_enabled(
+        db, int(guild_id) if guild_id is not None else None
+    )
 
 
 MISSING_FIGHT_PROMPT = (
@@ -333,6 +390,12 @@ def accept_fight(
         "accepted_at": accepted_at,
         "open_ended": bool(fight.get("open_ended")),
     }
+    # Underdog accepted a lopsided (warned) card — record, never a ruling.
+    favored = fight.get("balance_favored")
+    if fight.get("balance_warned") and favored in {"a", "b"}:
+        underdog = "b" if favored == "a" else "a"
+        if actor_advocate_side(fight, actor_id) == underdog:
+            fields["underdog_accepted"] = True
     if thread_id is not None:
         fields["thread_id"] = thread_id
     db.update_fight(fight_id, **fields)
@@ -411,31 +474,39 @@ def apply_balance_to_fight(
     *,
     balance_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Run balance when both sides are known; store scores without warning UI.
+    """Run balance when both sides are known; store scores + warning flag.
 
-    Deferred until sides complete (lead lock A1). 4c will set ``balance_warned``
-    and free-counter labeling from the stored fields; 4b does not post chrome.
+    Deferred until sides complete (lead lock A1) — no one-sided score.
+    ``balance_warned`` when ``score < balance_warn_below`` (default 4; 10=even).
+    Franchises stored via ``normalize_franchise_key`` (item 3 / Q5).
     """
     fight = db.get_fight(fight_id)
     if fight is None or not sides_complete(fight):
         return None
     if balance_fn is None:
-        from bot.judge import balance_read
+        from bot.judge import judge_balance
 
-        balance_fn = balance_read
+        balance_fn = judge_balance
     result = balance_fn(
         str(fight["side_a"]),
         str(fight["side_b"]),
         fight.get("context"),
     )
     favored = result.get("favored_side")
+    score = float(result["score"])
+    guild_id = fight.get("guild_id")
+    threshold = balance_warn_below(
+        db, int(guild_id) if guild_id is not None else None
+    )
+    # Strict below: score == threshold is even enough (see NOTES).
+    warned = score < float(threshold)
     fields: dict[str, Any] = {
-        "balance_score": float(result["score"]),
+        "balance_score": score,
         "balance_favored": None if favored in (None, "even") else str(favored),
         "balance_reason": str(result.get("reason") or "") or None,
-        "franchise_a": result.get("franchise_a"),
-        "franchise_b": result.get("franchise_b"),
-        # balance_warned left False for 4c to flip based on threshold.
+        "balance_warned": warned,
+        "franchise_a": normalize_franchise_key(result.get("franchise_a")),
+        "franchise_b": normalize_franchise_key(result.get("franchise_b")),
     }
     db.update_fight(fight_id, **fields)
     return result
@@ -460,8 +531,8 @@ def counter_fight(
     - Matchup / context overwrite **only if non-empty**.
     - Increments the countering advocate's side counter (pre-swap).
     - Resets ``expires_at``.
-    - At ``counters_per_side`` → ``voided`` (unless ``count_against_limit=False``;
-      4c free-counter hook).
+    - At ``counters_per_side`` → ``voided`` (unless ``count_against_limit=False``
+      or a free counter after a balance warning).
     """
     expire_due_fights(db, now)
     fight = db.get_fight(fight_id)
@@ -485,12 +556,11 @@ def counter_fight(
     cb = int(fight.get("counters_b") or 0)
     used = ca if side == "a" else cb
 
-    # 4c hook: free counter after balance warning skips the quota.
-    against = (
-        True
-        if count_against_limit is None
-        else bool(count_against_limit)
-    )
+    # Free counter after balance warning skips the quota.
+    if count_against_limit is None:
+        against = not is_balance_free_counter_eligible(fight, db=db)
+    else:
+        against = bool(count_against_limit)
     if against is False:
         pass
     elif used >= limit:

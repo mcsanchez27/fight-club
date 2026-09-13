@@ -4,11 +4,44 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 from bot.laws import get_laws
 from bot.retrieval import RetrievalResult, pack_retrieval_for_prompt, retrieve
 from bot.sources import cap_snippet, is_stale
+
+# Model routing (Tech Design §4 / §9). Balance helper wired for item 3.
+DEFAULT_MODEL_RULING = "claude-sonnet-5"
+DEFAULT_MODEL_BALANCE = "claude-haiku-4-5-20251001"
+ANTHROPIC_TIMEOUT_SECONDS = 60.0
+ANTHROPIC_MAX_RETRIES = 1
+
+
+def ruling_model() -> str:
+    """Ruling model: FIGHT_MODEL_RULING, else ANTHROPIC_MODEL (V1), else Sonnet 5 default."""
+    return (
+        os.getenv("FIGHT_MODEL_RULING")
+        or os.getenv("ANTHROPIC_MODEL")
+        or DEFAULT_MODEL_RULING
+    )
+
+
+def balance_model() -> str:
+    """Balance-check model (Haiku). Used by item 3; constant/helper shipped in item 1."""
+    return os.getenv("FIGHT_MODEL_BALANCE") or DEFAULT_MODEL_BALANCE
+
+
+def make_anthropic_client():
+    """Anthropic client with V2 latency settings: timeout=60, max_retries=1."""
+    from anthropic import Anthropic
+
+    return Anthropic(
+        api_key=os.getenv("ANTHROPIC_API_KEY"),
+        timeout=ANTHROPIC_TIMEOUT_SECONDS,
+        max_retries=ANTHROPIC_MAX_RETRIES,
+    )
+
 
 # Schema field order is intentional: steelman / concede / unknowns before the ruling.
 VERDICT_REQUIRED_FIELDS = (
@@ -83,6 +116,7 @@ VERDICT_INPUT_SCHEMA: dict[str, Any] = {
 }
 
 DELIVER_VERDICT_TOOL: dict[str, Any] = {
+    "type": "custom",
     "name": "deliver_verdict",
     "description": (
         "Deliver the court's structured verdict. Call this once with steelmans, "
@@ -287,13 +321,33 @@ def _extract_tool_verdict(resp: Any) -> dict[str, Any]:
     raise ValueError("Anthropic response missing deliver_verdict tool use")
 
 
+def _usage_from_response(resp: Any) -> dict[str, int]:
+    """Pull real input/output token counts from an Anthropic Messages response."""
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return {"input_tokens": 0, "output_tokens": 0}
+    tin = getattr(usage, "input_tokens", None)
+    tout = getattr(usage, "output_tokens", None)
+    if tin is None and isinstance(usage, dict):
+        tin = usage.get("input_tokens", 0)
+        tout = usage.get("output_tokens", 0)
+    return {
+        "input_tokens": int(tin or 0),
+        "output_tokens": int(tout or 0),
+    }
+
+
+def _attach_usage(verdict: dict[str, Any], usage: dict[str, Any]) -> dict[str, Any]:
+    out = dict(verdict)
+    out["_usage"] = dict(usage)
+    return out
+
+
 def _judge_anthropic(user_msg: str) -> dict[str, Any]:
-    from anthropic import Anthropic
+    model = ruling_model()
+    client = make_anthropic_client()
 
-    model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
-    def _call() -> dict[str, Any]:
+    def _call() -> tuple[dict[str, Any], dict[str, int]]:
         try:
             resp = client.messages.create(
                 model=model,
@@ -306,13 +360,14 @@ def _judge_anthropic(user_msg: str) -> dict[str, Any]:
             )
         except Exception as e:
             raise RuntimeError(f"Anthropic request failed: {e}") from e
-        return _extract_tool_verdict(resp)
+        return _extract_tool_verdict(resp), _usage_from_response(resp)
 
     try:
-        return _call()
+        verdict, usage = _call()
     except ValueError:
-        # Retry once on validation / missing-tool failure
-        return _call()
+        # Retry once on validation / missing-tool failure (app-level; SDK max_retries=1)
+        verdict, usage = _call()
+    return _attach_usage(verdict, usage)
 
 
 def _judge_openai(user_msg: str) -> dict[str, Any]:
@@ -343,9 +398,11 @@ def _judge_openai(user_msg: str) -> dict[str, Any]:
         return validate_verdict(json.loads(content))
 
     try:
-        return _call()
+        verdict = _call()
     except (ValueError, json.JSONDecodeError):
-        return _call()
+        verdict = _call()
+    # OpenAI path: no guaranteed usage object in all providers — leave zeros for caller fallback.
+    return _attach_usage(verdict, {"input_tokens": 0, "output_tokens": 0})
 
 
 def judge(
@@ -360,12 +417,19 @@ def judge(
     skip_retrieval: bool = False,
     retrieval_result: RetrievalResult | None = None,
 ) -> dict[str, Any]:
-    """Return a structured verdict dict for A vs B (with receipts when available)."""
+    """Return a structured verdict dict for A vs B (with receipts when available).
+
+    Attaches ``_usage`` with real Anthropic token counts (when available) and stage
+    timings: retrieval_seconds, judge_seconds, total_seconds.
+    """
+    t_total = time.monotonic()
     exhibit_list = list(exhibits or [])
     if challenge and challenge.strip():
         exhibit_list.append(challenge.strip())
 
+    retrieval_seconds = 0.0
     if retrieval_result is None and not skip_retrieval:
+        t_ret = time.monotonic()
         retrieval_result = retrieve(
             fighter_a,
             fighter_b,
@@ -373,13 +437,19 @@ def judge(
             franchise_hint=franchise,
             exhibits=exhibit_list,
         )
+        retrieval_seconds = float(
+            getattr(retrieval_result, "retrieval_seconds", 0.0) or (time.monotonic() - t_ret)
+        )
     elif retrieval_result is None:
         retrieval_result = RetrievalResult(
             franchise=franchise,
             status="disabled",
             receipts=[],
             exhibits=[],
+            retrieval_seconds=0.0,
         )
+    else:
+        retrieval_seconds = float(getattr(retrieval_result, "retrieval_seconds", 0.0) or 0.0)
 
     user_parts = [
         f"Matchup: {fighter_a} vs {fighter_b}",
@@ -396,6 +466,7 @@ def judge(
         )
     user_msg = "\n\n".join(user_parts)
 
+    t_judge = time.monotonic()
     if os.getenv("ANTHROPIC_API_KEY"):
         verdict = _judge_anthropic(user_msg)
     elif os.getenv("OPENAI_API_KEY"):
@@ -405,8 +476,28 @@ def judge(
             "No LLM API key set. Set ANTHROPIC_API_KEY (preferred) or OPENAI_API_KEY. "
             "Copy .env.example to .env and add your key."
         )
+    judge_seconds = time.monotonic() - t_judge
+    total_seconds = retrieval_seconds + judge_seconds
 
-    return apply_retrieval_guardrails(verdict, retrieval_result)
+    # Preserve any provider token counts; always stamp stage timings.
+    usage = dict(verdict.get("_usage") or {})
+    usage.update(
+        {
+            "retrieval_seconds": round(retrieval_seconds, 4),
+            "judge_seconds": round(judge_seconds, 4),
+            "total_seconds": round(total_seconds, 4),
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+        }
+    )
+    # Wall clock for the whole judge() call (includes prompt pack); keep additive stages above.
+    usage["wall_seconds"] = round(time.monotonic() - t_total, 4)
+    verdict = _attach_usage(verdict, usage)
+
+    guarded = apply_retrieval_guardrails(verdict, retrieval_result)
+    # apply_retrieval_guardrails copies the dict but may drop unknown keys — reattach.
+    guarded["_usage"] = usage
+    return guarded
 
 
 def format_verdict_text(v: dict[str, Any]) -> str:

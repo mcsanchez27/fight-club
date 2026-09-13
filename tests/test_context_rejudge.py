@@ -22,12 +22,13 @@ def test_challenge_modal_passes_fighters_and_context_explicitly() -> None:
 
     captured: dict = {}
 
-    def fake_judge(a, b, context=None, prior_verdict=None, challenge=None):
+    def fake_judge(a, b, context=None, prior_verdict=None, challenge=None, **kwargs):
         captured["a"] = a
         captured["b"] = b
         captured["context"] = context
         captured["prior"] = prior_verdict
         captured["challenge"] = challenge
+        captured["kwargs"] = kwargs
         return {
             "matchup": "Goku vs Superman",
             "winner": "Goku",
@@ -48,19 +49,28 @@ def test_challenge_modal_passes_fighters_and_context_explicitly() -> None:
         msg.id = 777
         return msg
 
+    async def edit_original_response(**kwargs):
+        return None
+
     interaction = MagicMock()
     interaction.response.defer = defer
     interaction.followup.send = followup_send
+    interaction.edit_original_response = edit_original_response
     modal.evidence = "new canon citation"  # type: ignore[assignment]
 
     async def run() -> None:
         fake_db = MagicMock()
         fake_db.insert_ruling.return_value = 2
+        fake_retrieval = MagicMock()
+        fake_retrieval.retrieval_seconds = 0.1
         with patch("bot.commands.judge", side_effect=fake_judge), patch(
+            "bot.commands.retrieve", return_value=fake_retrieval
+        ), patch(
             "bot.commands.verdict_embed", return_value=MagicMock()
         ), patch("bot.commands.ChallengeView", return_value=MagicMock()), patch(
             "bot.commands.get_db", return_value=fake_db
-        ):
+        ), patch("bot.commands.limiter") as lim:
+            lim.check.return_value = None
             await modal.on_submit(interaction)
 
     asyncio.run(run())

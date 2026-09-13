@@ -18,11 +18,11 @@ def token_ceiling() -> int:
 
 
 def input_usd_per_mtok() -> float:
-    return float(os.getenv("FIGHT_USD_PER_MTOK_INPUT", "3.0"))
+    return float(os.getenv("FIGHT_USD_PER_MTOK_INPUT", "2.0"))
 
 
 def output_usd_per_mtok() -> float:
-    return float(os.getenv("FIGHT_USD_PER_MTOK_OUTPUT", "15.0"))
+    return float(os.getenv("FIGHT_USD_PER_MTOK_OUTPUT", "10.0"))
 
 
 def current_month() -> str:
@@ -89,7 +89,11 @@ def record_estimated_usage(
     tokens_in: int,
     tokens_out: int,
     db: CourtDB | None = None,
+    retrieval_seconds: float = 0.0,
+    judge_seconds: float = 0.0,
+    total_seconds: float = 0.0,
 ) -> float:
+    """Book usage. Prefer real Anthropic token counts when available."""
     db = db or get_db()
     usd = estimate_usd(tokens_in, tokens_out)
     db.record_usage(
@@ -97,5 +101,20 @@ def record_estimated_usage(
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         estimated_usd=usd,
+        retrieval_seconds=retrieval_seconds,
+        judge_seconds=judge_seconds,
+        total_seconds=total_seconds,
     )
     return usd
+
+
+def usage_from_verdict(verdict: dict) -> dict:
+    """Extract token + stage timing fields from a judge verdict's ``_usage`` blob."""
+    raw = (verdict or {}).get("_usage") or {}
+    return {
+        "tokens_in": int(raw.get("input_tokens") or 0),
+        "tokens_out": int(raw.get("output_tokens") or 0),
+        "retrieval_seconds": float(raw.get("retrieval_seconds") or 0.0),
+        "judge_seconds": float(raw.get("judge_seconds") or 0.0),
+        "total_seconds": float(raw.get("total_seconds") or 0.0),
+    }

@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS usage_events (
     tokens_in INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0,
     estimated_usd REAL NOT NULL DEFAULT 0,
+    retrieval_seconds REAL NOT NULL DEFAULT 0,
+    judge_seconds REAL NOT NULL DEFAULT 0,
+    total_seconds REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -93,7 +96,7 @@ class CourtDB:
         self._conn.commit()
 
     def _migrate(self) -> None:
-        """Add columns introduced in Phase 3 to existing DBs."""
+        """Add columns introduced in Phase 3 / V2 item 1 to existing DBs."""
         cols = {
             r["name"]
             for r in self._conn.execute("PRAGMA table_info(rulings)").fetchall()
@@ -106,6 +109,19 @@ class CourtDB:
             self._conn.execute(
                 "ALTER TABLE rulings ADD COLUMN voided INTEGER NOT NULL DEFAULT 0"
             )
+        usage_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(usage_events)").fetchall()
+        }
+        for col, decl in (
+            ("retrieval_seconds", "REAL NOT NULL DEFAULT 0"),
+            ("judge_seconds", "REAL NOT NULL DEFAULT 0"),
+            ("total_seconds", "REAL NOT NULL DEFAULT 0"),
+        ):
+            if col not in usage_cols:
+                self._conn.execute(
+                    f"ALTER TABLE usage_events ADD COLUMN {col} {decl}"
+                )
 
     def close(self) -> None:
         self._conn.close()
@@ -303,13 +319,27 @@ class CourtDB:
         tokens_in: int,
         tokens_out: int,
         estimated_usd: float,
+        retrieval_seconds: float = 0.0,
+        judge_seconds: float = 0.0,
+        total_seconds: float = 0.0,
     ) -> int:
         cur = self._conn.execute(
             """
-            INSERT INTO usage_events (month, tokens_in, tokens_out, estimated_usd)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO usage_events (
+                month, tokens_in, tokens_out, estimated_usd,
+                retrieval_seconds, judge_seconds, total_seconds
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (month, tokens_in, tokens_out, estimated_usd),
+            (
+                month,
+                tokens_in,
+                tokens_out,
+                estimated_usd,
+                float(retrieval_seconds or 0.0),
+                float(judge_seconds or 0.0),
+                float(total_seconds or 0.0),
+            ),
         )
         self._conn.commit()
         return int(cur.lastrowid)

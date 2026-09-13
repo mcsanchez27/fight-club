@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -26,6 +27,8 @@ from bot.sources import (
 
 USER_AGENT = "FightClubCourt/0.3 (+https://github.com/mcsanchez27/fight-club; receipts)"
 FETCH_TIMEOUT = 8
+# Global wall-clock budget for all wiki/HTML fetches in one retrieve() call (Tech Design §9).
+RETRIEVAL_BUDGET_SECONDS = float(os.getenv("FIGHT_RETRIEVAL_BUDGET_SECONDS", "10"))
 
 
 @dataclass
@@ -80,15 +83,29 @@ class _HTMLTextExtractor(HTMLParser):
         return " ".join(self._chunks)
 
 
-def _http_get(url: str) -> bytes:
+def _remaining_timeout(deadline: float | None, default: float = FETCH_TIMEOUT) -> float:
+    """Seconds left before deadline, capped by default per-request timeout."""
+    if deadline is None:
+        return default
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return 0.0
+    return min(default, left)
+
+
+def _http_get(url: str, *, timeout: float | None = None, deadline: float | None = None) -> bytes:
     if is_hard_no_url(url):
         raise ValueError(f"hard-no URL blocked: {url}")
+    if timeout is None:
+        timeout = _remaining_timeout(deadline, FETCH_TIMEOUT)
+    if timeout <= 0:
+        raise TimeoutError("retrieval budget exhausted")
     req = urllib.request.Request(
         url,
         headers={"User-Agent": USER_AGENT, "Accept": "application/json,text/html,*/*"},
         method="GET",
     )
-    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
 
@@ -168,7 +185,9 @@ def _html_url_is_verified(url: str, base: str) -> bool:
     return True
 
 
-def _mediawiki_extract_text(api: str, title: str) -> tuple[str, dict[str, Any]]:
+def _mediawiki_extract_text(
+    api: str, title: str, *, deadline: float | None = None
+) -> tuple[str, dict[str, Any]]:
     """Prefer TextExtracts; Fandom often disables it, so fall back to parse+strip."""
     page_params = {
         "action": "query",
@@ -180,7 +199,9 @@ def _mediawiki_extract_text(api: str, title: str) -> tuple[str, dict[str, Any]]:
         "inprop": "url",
         "format": "json",
     }
-    page_raw = _http_get(api + "?" + urllib.parse.urlencode(page_params))
+    page_raw = _http_get(
+        api + "?" + urllib.parse.urlencode(page_params), deadline=deadline
+    )
     page_data = json.loads(page_raw.decode("utf-8", errors="replace"))
     pages = ((page_data.get("query") or {}).get("pages")) or {}
     page: dict[str, Any] = {}
@@ -201,7 +222,9 @@ def _mediawiki_extract_text(api: str, title: str) -> tuple[str, dict[str, Any]]:
         "format": "json",
     }
     try:
-        parse_raw = _http_get(api + "?" + urllib.parse.urlencode(parse_params))
+        parse_raw = _http_get(
+            api + "?" + urllib.parse.urlencode(parse_params), deadline=deadline
+        )
         parse_data = json.loads(parse_raw.decode("utf-8", errors="replace"))
         html = ((parse_data.get("parse") or {}).get("text") or {})
         if isinstance(html, dict):
@@ -221,8 +244,10 @@ def _mediawiki_passage_from_title(
     source_name: str,
     franchise_key: str,
     now: str,
+    *,
+    deadline: float | None = None,
 ) -> Passage | None:
-    extract, page = _mediawiki_extract_text(api, title)
+    extract, page = _mediawiki_extract_text(api, title, deadline=deadline)
     if _page_is_missing(page):
         return None
     actual_title = str(page.get("title") or title)
@@ -246,9 +271,16 @@ def _mediawiki_passage_from_title(
 
 
 def _mediawiki_search_and_extract(
-    base_url: str, query: str, source_name: str, franchise_key: str
+    base_url: str,
+    query: str,
+    source_name: str,
+    franchise_key: str,
+    *,
+    deadline: float | None = None,
 ) -> list[Passage]:
     """Exact-title lookup first (titles=), then filtered search; reject weak title matches."""
+    if deadline is not None and time.monotonic() >= deadline:
+        return []
     base = base_url.rstrip("/")
     api = f"{base}/api.php"
     now = _now_iso()
@@ -262,8 +294,10 @@ def _mediawiki_search_and_extract(
         title_candidates.append(titled)
 
     for title_try in title_candidates:
+        if deadline is not None and time.monotonic() >= deadline:
+            return []
         hit = _mediawiki_passage_from_title(
-            api, base, title_try, q, source_name, franchise_key, now
+            api, base, title_try, q, source_name, franchise_key, now, deadline=deadline
         )
         if hit:
             return [hit]
@@ -275,16 +309,18 @@ def _mediawiki_search_and_extract(
         "srlimit": "5",
         "format": "json",
     }
-    raw = _http_get(api + "?" + urllib.parse.urlencode(params))
+    raw = _http_get(api + "?" + urllib.parse.urlencode(params), deadline=deadline)
     data = json.loads(raw.decode("utf-8", errors="replace"))
     hits = (((data.get("query") or {}).get("search")) or [])[:5]
     out: list[Passage] = []
     for hit in hits:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         title = str(hit.get("title") or "")
         if not title or not _title_matches_query(title, q):
             continue
         passage = _mediawiki_passage_from_title(
-            api, base, title, q, source_name, franchise_key, now
+            api, base, title, q, source_name, franchise_key, now, deadline=deadline
         )
         if passage:
             out.append(passage)
@@ -293,22 +329,33 @@ def _mediawiki_search_and_extract(
     return out
 
 
-def _html_search_snippet(base_url: str, query: str, source_name: str, franchise_key: str) -> list[Passage]:
+def _html_search_snippet(
+    base_url: str,
+    query: str,
+    source_name: str,
+    franchise_key: str,
+    *,
+    deadline: float | None = None,
+) -> list[Passage]:
     """Best-effort HTML fetch for non-MediaWiki allowlisted sites (e.g. Kanzenshuu).
 
     Never treats the bare homepage as a verified receipt; homepage is not a candidate.
     """
+    if deadline is not None and time.monotonic() >= deadline:
+        return []
     base = base_url.rstrip("/")
     q = urllib.parse.quote_plus(query)
     # Do not include bare homepage — it must never count as a verified receipt.
     candidates = [f"{base}/?s={q}", f"{base}/search?q={q}"]
     now = _now_iso()
     for url in candidates:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         if not url_allowed(url, franchise_key) and url.rstrip("/") != base:
             if urllib.parse.urlparse(url).hostname != urllib.parse.urlparse(base).hostname:
                 continue
         try:
-            raw = _http_get(url)
+            raw = _http_get(url, deadline=deadline)
         except Exception:
             continue
         body = _strip_html(raw.decode("utf-8", errors="replace"))
@@ -355,24 +402,49 @@ def _looks_like_article_snippet(text: str, query: str) -> bool:
     return True
 
 
-def _fetch_for_query(franchise_key: str, query: str) -> list[Passage]:
+def _fetch_one_source(
+    franchise_key: str,
+    query: str,
+    src: dict[str, Any],
+    *,
+    deadline: float | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> list[Passage]:
+    """Fetch passages for a single allowlisted source (one independent unit of work)."""
+    if deadline is not None and time.monotonic() >= deadline:
+        return []
+    cfg = cfg or load_sources_config()
+    name = str(src.get("name") or "source")
+    base = str(src.get("base_url") or "")
+    api = str(src.get("api") or "mediawiki")
+    if not base or is_hard_no_url(base, cfg):
+        return []
+    try:
+        if api == "mediawiki":
+            return _mediawiki_search_and_extract(
+                base, query, name, franchise_key, deadline=deadline
+            )
+        return _html_search_snippet(
+            base, query, name, franchise_key, deadline=deadline
+        )
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
+        return []
+    except Exception:
+        return []
+
+
+def _fetch_for_query(
+    franchise_key: str, query: str, *, deadline: float | None = None
+) -> list[Passage]:
+    """Sequential multi-source fetch (kept for tests / single-query callers)."""
     cfg = load_sources_config()
     passages: list[Passage] = []
     for src in franchise_sources(franchise_key, cfg):
-        name = str(src.get("name") or "source")
-        base = str(src.get("base_url") or "")
-        api = str(src.get("api") or "mediawiki")
-        if not base or is_hard_no_url(base, cfg):
-            continue
-        try:
-            if api == "mediawiki":
-                passages.extend(_mediawiki_search_and_extract(base, query, name, franchise_key))
-            else:
-                passages.extend(_html_search_snippet(base, query, name, franchise_key))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
-            continue
-        except Exception:
-            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        passages.extend(
+            _fetch_one_source(franchise_key, query, src, deadline=deadline, cfg=cfg)
+        )
     return passages
 
 
@@ -393,31 +465,61 @@ class RetrievalResult:
     status: str
     receipts: list[Passage]
     exhibits: list[Passage]
+    retrieval_seconds: float = 0.0
 
     @property
     def retrieval_unavailable(self) -> bool:
         return self.status in {"unavailable", "unlisted", "disabled"}
 
 
-def retrieve(fighter_a: str, fighter_b: str, context: str | None = None, *, franchise_hint: str | None = None, exhibits: list[str] | None = None) -> RetrievalResult:
-    """Fetch allowlisted receipts; build exhibits from user pastes. Never raises for network failure."""
+def retrieve(fighter_a: str, fighter_b: str, context: str | None = None, *, franchise_hint: str | None = None, exhibits: list[str] | None = None, budget_seconds: float | None = None) -> RetrievalResult:
+    """Fetch allowlisted receipts; build exhibits from user pastes. Never raises for network failure.
+
+    Independent wiki/HTML fetches run in parallel under a hard wall-clock budget
+    (default ~10s, Tech Design §9). Round-3 rules unchanged: exact-title first,
+    no homepage verified, code-owned verified.
+    """
+    t0 = time.monotonic()
+    budget = RETRIEVAL_BUDGET_SECONDS if budget_seconds is None else float(budget_seconds)
+    deadline = t0 + max(0.0, budget)
+
+    def _elapsed() -> float:
+        return round(time.monotonic() - t0, 4)
+
     exhibit_passages = [exhibit_from_text(t, franchise_key=None) for t in (exhibits or []) if t and t.strip()]
     if not retrieval_enabled():
-        return RetrievalResult(franchise=detect_franchise(fighter_a, fighter_b, context, franchise_hint), status="disabled", receipts=[], exhibits=exhibit_passages)
+        return RetrievalResult(
+            franchise=detect_franchise(fighter_a, fighter_b, context, franchise_hint),
+            status="disabled",
+            receipts=[],
+            exhibits=exhibit_passages,
+            retrieval_seconds=_elapsed(),
+        )
     franchise = detect_franchise(fighter_a, fighter_b, context, franchise_hint)
     if not franchise:
-        return RetrievalResult(franchise=None, status="unlisted", receipts=[], exhibits=[exhibit_from_text(t, franchise_key=None) for t in (exhibits or []) if t and t.strip()])
+        return RetrievalResult(
+            franchise=None,
+            status="unlisted",
+            receipts=[],
+            exhibits=[exhibit_from_text(t, franchise_key=None) for t in (exhibits or []) if t and t.strip()],
+            retrieval_seconds=_elapsed(),
+        )
     exhibit_passages = [exhibit_from_text(t, franchise_key=franchise) for t in (exhibits or []) if t and t.strip()]
     queries = [fighter_a.strip(), fighter_b.strip()]
     if context and context.strip():
         queries.append(context.strip()[:80])
+    queries = [q for q in queries if q]
+
     receipts: list[Passage] = []
     ttl = cache_ttl_seconds()
     any_attempted = False
     any_success = False
+    cfg = load_sources_config()
+    sources = list(franchise_sources(franchise, cfg))
+
+    # Cache hits first (no network); collect miss jobs for parallel fetch.
+    jobs: list[tuple[str, dict[str, Any]]] = []
     for q in queries:
-        if not q:
-            continue
         cache_key = f"{franchise}::{q.lower()}"
         hit = _CACHE.get(cache_key)
         if hit and hit[0] > time.time():
@@ -426,14 +528,55 @@ def retrieve(fighter_a: str, fighter_b: str, context: str | None = None, *, fran
             any_success = True
             continue
         any_attempted = True
+        for src in sources:
+            jobs.append((q, src))
+
+    # Parallel independent fetches under the global deadline.
+    found_by_query: dict[str, list[Passage]] = {q: [] for q, _ in jobs}
+    if jobs and time.monotonic() < deadline:
+        max_workers = min(6, len(jobs))
+        ex = ThreadPoolExecutor(max_workers=max_workers)
         try:
-            found = _fetch_for_query(franchise, q)
-        except Exception:
-            found = []
-        if found:
-            any_success = True
-            _CACHE[cache_key] = (time.time() + ttl, found)
-            receipts.extend(found)
+            future_map = {
+                ex.submit(
+                    _fetch_one_source, franchise, q, src, deadline=deadline, cfg=cfg
+                ): q
+                for q, src in jobs
+            }
+            pending = set(future_map.keys())
+            while pending:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                done, pending = wait(pending, timeout=left, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    q = future_map[fut]
+                    try:
+                        found = fut.result(timeout=0)
+                    except Exception:
+                        found = []
+                    if found:
+                        found_by_query.setdefault(q, []).extend(found)
+        finally:
+            # Do not block on stragglers past the budget.
+            ex.shutdown(wait=False, cancel_futures=True)
+
+    for q, found in found_by_query.items():
+        if not found:
+            continue
+        any_success = True
+        # Dedup within query before caching
+        seen_q: set[str] = set()
+        dedup_q: list[Passage] = []
+        for p in found:
+            key = f"{p.source_url}|{p.locator}"
+            if key in seen_q:
+                continue
+            seen_q.add(key)
+            dedup_q.append(p)
+        _CACHE[f"{franchise}::{q.lower()}"] = (time.time() + ttl, dedup_q)
+        receipts.extend(dedup_q)
+
     seen: set[str] = set()
     deduped: list[Passage] = []
     for p in receipts:
@@ -443,9 +586,23 @@ def retrieve(fighter_a: str, fighter_b: str, context: str | None = None, *, fran
         seen.add(key)
         p.retrieval_id = f"ret_{len(deduped) + 1}"
         deduped.append(p)
+    elapsed = _elapsed()
     if not any_success:
-        return RetrievalResult(franchise=franchise, status="unavailable", receipts=[], exhibits=exhibit_passages)
-    return RetrievalResult(franchise=franchise, status="ok", receipts=deduped[:8], exhibits=exhibit_passages)
+        # Distinguish "never tried" vs "tried and failed/budget" — same unavailable as V1.
+        return RetrievalResult(
+            franchise=franchise,
+            status="unavailable",
+            receipts=[],
+            exhibits=exhibit_passages,
+            retrieval_seconds=elapsed,
+        )
+    return RetrievalResult(
+        franchise=franchise,
+        status="ok",
+        receipts=deduped[:8],
+        exhibits=exhibit_passages,
+        retrieval_seconds=elapsed,
+    )
 
 
 def clear_retrieval_cache() -> None:

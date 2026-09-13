@@ -45,3 +45,11 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 10. **`/docket remove` / claim / run** — only add/list were requested.
 
 11. **Remove OpenAI dependency** — remains as fallback; not removed.
+
+## V2 item 1 (latency) — Sept 13 2026
+
+12. **Anthropic call shape** — Inspected SDK 0.125: `messages.create` + `input_schema` tool + `tool_choice={"type":"tool","name":...}` still valid. Added optional `"type":"custom"` on the tool dict for forward compatibility. Client now `timeout=60, max_retries=1`. Ruling model via `FIGHT_MODEL_RULING` (default `claude-sonnet-5`) with `ANTHROPIC_MODEL` as V1 fallback.
+
+13. **usage_events timings** — Additive columns only (`retrieval_seconds`, `judge_seconds`, `total_seconds`). Full V2 `fights` schema / `fight_id` / balance role deferred to item 2–3. Real `input_tokens`/`output_tokens` from Anthropic `response.usage` when present; flat estimates remain the fallback.
+
+14. **Retrieval parallelism** — Query×source jobs share one `ThreadPoolExecutor`; executor `shutdown(wait=False, cancel_futures=True)` so the 10s wall clock does not wait on stragglers. In-flight urllib calls are not hard-killed (stdlib limitation).

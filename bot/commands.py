@@ -15,12 +15,18 @@ from bot.budget import (
     check_budget,
     estimate_tokens,
     record_estimated_usage,
+    usage_from_verdict,
 )
 from bot.db import get_db
 from bot.embeds import verdict_embed
 from bot.export import export_markdown
 from bot.judge import judge
 from bot.limits import limiter
+from bot.progress import (
+    PROGRESS_JUDGING,
+    PROGRESS_RETRIEVING,
+    edit_deferred_progress,
+)
 from bot.retrieval import retrieve
 
 log = logging.getLogger("fightclub")
@@ -126,8 +132,20 @@ def _persist_ruling(
         message_id, verdict, fighter_a=fighter_a, fighter_b=fighter_b,
         context=context, ruling_id=ruling_id,
     )
-    tin = 5000 if retrieval_status == "ok" else 2500
-    record_estimated_usage(tokens_in=tin, tokens_out=1000)
+    u = usage_from_verdict(verdict)
+    tin = u["tokens_in"]
+    tout = u["tokens_out"]
+    # Fallback to design-doc estimates when the provider did not return usage.
+    if tin <= 0 and tout <= 0:
+        tin = 5000 if retrieval_status == "ok" else 2500
+        tout = 1000
+    record_estimated_usage(
+        tokens_in=tin,
+        tokens_out=tout,
+        retrieval_seconds=u["retrieval_seconds"],
+        judge_seconds=u["judge_seconds"],
+        total_seconds=u["total_seconds"],
+    )
     return ruling_id
 
 
@@ -161,9 +179,25 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
             await interaction.response.send_message(reject, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
+        await edit_deferred_progress(interaction, PROGRESS_RETRIEVING)
         try:
+            result = await asyncio.to_thread(
+                retrieve,
+                self.fighter_a,
+                self.fighter_b,
+                self.context,
+                exhibits=[str(self.evidence)],
+            )
+            await edit_deferred_progress(interaction, PROGRESS_JUDGING)
             verdict = await asyncio.to_thread(
-                judge, self.fighter_a, self.fighter_b, self.context, self.prior, str(self.evidence),
+                judge,
+                self.fighter_a,
+                self.fighter_b,
+                self.context,
+                self.prior,
+                str(self.evidence),
+                exhibits=[str(self.evidence)],
+                retrieval_result=result,
             )
         except Exception as e:
             await interaction.followup.send(f"Re-judge failed: {e}", ephemeral=True)
@@ -283,6 +317,7 @@ class FightCog(commands.Cog):
             return
         await interaction.response.defer(thinking=True)
         exhibit_list = [exhibits] if exhibits and exhibits.strip() else []
+        await edit_deferred_progress(interaction, PROGRESS_RETRIEVING)
         try:
             result = await asyncio.to_thread(
                 retrieve, fighter_a, fighter_b, context,
@@ -294,6 +329,7 @@ class FightCog(commands.Cog):
             if tok_reject:
                 await interaction.followup.send(tok_reject, ephemeral=True)
                 return
+            await edit_deferred_progress(interaction, PROGRESS_JUDGING)
             verdict = await asyncio.to_thread(
                 judge, fighter_a, fighter_b, context, None, None,
                 exhibits=exhibit_list, franchise=franchise, retrieval_result=result,

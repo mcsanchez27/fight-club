@@ -265,6 +265,26 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     thread ruling embed via `ruling_drop_embed(..., flare_line=)` wired from
     `drop_ruling_messages` after the ruling row exists.
 
-57. **Out of scope** — `/reconsider` (10), `/config` (11), instant refactor
-    (12), README (13).
+57. **Out of scope in item 9** — completed by item 10 / pending 11–13 as noted below.
+
+## V2 item 10 (`/reconsider`) — Sept 13 2026
+
+58. **Once per fight** — `/reconsider evidence:"..."` only when status is
+    `ruled`, advocate + in-thread, non-empty evidence. Second call rejected.
+    New ruling `kind='reconsideration'` with `parent_ruling_id` → original
+    `initial` row; both stay on record. Status stays `ruled`.
+
+59. **Snapshot-only (amendment 2)** — `reconsider_fight` reads
+    `transcript_snapshot` from the prior ruling or fight staging only. No live
+    Discord history fetch. Prior ruling + evidence fill `{{PRIOR_RULING}}`.
+
+60. **Receipts A2** — reuse fight-keyed accept receipts via
+    `load_or_refresh_receipts` (one-shot refresh if empty/unavailable); no full
+    re-retrieve by default.
+
+61. **Drop** — second embed titled "Ruling on reconsideration" with Diff field
+    (`Winner unchanged, confidence X → Y` or `Winner reversed`). Derived
+    records (item 9) already take latest initial/reconsideration per fight.
+
+62. **Out of scope** — `/config` (11), instant refactor (12), README (13).
 

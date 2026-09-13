@@ -238,12 +238,15 @@ def ruling_drop_embed(
     thin_record: bool = False,
     exhibit_ledger: Any | None = None,
     flare_line: str | None = None,
+    title: str | None = None,
+    diff_line: str | None = None,
 ) -> discord.Embed:
     """Full thread ruling drop (item 8): steelmans → ledger → ruling → winner.
 
     Field lengths clipped like V1 ``verdict_embed``. Optional thin-record banner
     (Amendment 7) prepended to the description. Optional flare line (item 9)
-    appended after citations.
+    appended after citations. Item 10 reconsideration may pass ``title`` and
+    ``diff_line``.
     """
     conf = float(v.get("confidence", 0) or 0)
     status = v.get("retrieval_status")
@@ -276,11 +279,15 @@ def ruling_drop_embed(
             + (description if description != "—" else "")
         )
 
+    embed_title = title if title else f"⚖ {_clip(str(matchup), 250)}"
     embed = discord.Embed(
-        title=f"⚖ {_clip(str(matchup), 250)}",
+        title=_clip(str(embed_title), 250),
         description=_clip(description, 4000),
         color=color,
     )
+    diff = diff_line or v.get("reconsideration_diff")
+    if diff:
+        embed.add_field(name="Diff", value=_clip(str(diff), 256), inline=False)
     embed.add_field(
         name="Steelman A", value=_clip(str(v.get("steelman_a", ""))), inline=False
     )
@@ -328,7 +335,10 @@ def ruling_drop_embed(
     if flare:
         embed.add_field(name="​", value=_clip(str(flare)), inline=False)
 
-    footer_bits = ["Fight Club Court · initial ruling"]
+    if title and "reconsideration" in str(title).lower():
+        footer_bits = ["Fight Club Court · reconsideration"]
+    else:
+        footer_bits = ["Fight Club Court · initial ruling"]
     if status:
         footer_bits.append(f"receipts: {status}")
     if banner:

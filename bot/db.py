@@ -729,6 +729,39 @@ class CourtDB:
         ).fetchone()
         return self._row_to_ruling(row) if row else None
 
+    def get_initial_ruling_for_fight(self, fight_id: int) -> dict[str, Any] | None:
+        """Earliest ``kind='initial'`` ruling for a fight (parent for reconsider)."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM rulings
+            WHERE fight_id = ? AND kind = 'initial'
+            ORDER BY id ASC LIMIT 1
+            """,
+            (int(fight_id),),
+        ).fetchone()
+        if row is None:
+            row = self._conn.execute(
+                """
+                SELECT * FROM rulings
+                WHERE fight_id = ?
+                ORDER BY id ASC LIMIT 1
+                """,
+                (int(fight_id),),
+            ).fetchone()
+        return self._row_to_ruling(row) if row else None
+
+    def fight_has_reconsideration(self, fight_id: int) -> bool:
+        """True when a reconsideration ruling already exists for this fight."""
+        row = self._conn.execute(
+            """
+            SELECT 1 AS ok FROM rulings
+            WHERE fight_id = ? AND kind = 'reconsideration'
+            LIMIT 1
+            """,
+            (int(fight_id),),
+        ).fetchone()
+        return row is not None
+
     def update_ruling(self, ruling_id: int, **fields: Any) -> None:
         """Patch ruling columns (e.g. message_id after Discord drop)."""
         if not fields:

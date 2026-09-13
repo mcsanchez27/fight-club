@@ -59,6 +59,7 @@ from bot.ruling import (
     display_name,
     format_winner_one_liner,
     jump_url,
+    reconsider_fight,
     rule_fight,
 )
 from bot.judge import judge
@@ -834,6 +835,61 @@ async def drop_ruling_messages(
     return thread_msg
 
 
+RECONSIDERATION_EMBED_TITLE = "Ruling on reconsideration"
+
+
+async def drop_reconsideration_messages(
+    *,
+    thread: Any,
+    result: dict[str, Any],
+) -> Any:
+    """Post the second embed titled "Ruling on reconsideration" with one-line diff."""
+    fight = result["fight"]
+    verdict = result["verdict"]
+    flare = result.get("flare_line")
+    if not flare:
+        winner_adv = None
+        ws = (verdict or {}).get("winner_side")
+        if ws in {"a", "b"}:
+            winner_adv = fight.get(f"advocate_{ws}_id")
+        if winner_adv is not None and fight.get("guild_id") is not None:
+            try:
+                side_name = str(fight.get(f"side_{ws}") or ws.upper())
+                flare = flare_for_winner(
+                    get_db(),
+                    guild_id=int(fight["guild_id"]),
+                    winner_advocate_id=int(winner_adv),
+                    winner_name=side_name,
+                )
+            except Exception as e:
+                log.warning("flare compute failed (reconsider): %s", e)
+                flare = None
+    embed = ruling_drop_embed(
+        verdict,
+        fight=fight,
+        thin_record=bool(result.get("thin_record")),
+        exhibit_ledger=result.get("exhibit_ledger"),
+        flare_line=flare,
+        title=RECONSIDERATION_EMBED_TITLE,
+        diff_line=result.get("diff_line") or (verdict or {}).get("reconsideration_diff"),
+    )
+    thread_msg = await thread.send(embed=embed)
+    ruling_id = result.get("ruling_id")
+    if ruling_id is not None:
+        try:
+            get_db().update_ruling(
+                int(ruling_id),
+                message_id=int(thread_msg.id),
+                channel_id=int(
+                    getattr(thread, "id", None) or fight.get("thread_id") or 0
+                )
+                or None,
+            )
+        except Exception as e:
+            log.warning("update reconsideration message_id failed: %s", e)
+    return thread_msg
+
+
 async def fetch_thread_message_dicts(channel: Any, *, limit: int = 500) -> list[dict[str, Any]]:
     """Pull thread history newest-last → chronological message-like dicts."""
     if channel is None or not hasattr(channel, "history"):
@@ -1211,6 +1267,79 @@ class FightCog(commands.Cog):
                 "Cancel requested. Waiting for the other advocate to `/cancel`."
             )
         await interaction.response.send_message(msg)
+
+    @app_commands.command(
+        name="reconsider",
+        description="Motion for reconsideration (advocates, once per fight, evidence required)",
+    )
+    @app_commands.describe(evidence="New evidence the court missed (required, non-empty)")
+    async def reconsider_cmd(
+        self, interaction: discord.Interaction, evidence: str
+    ) -> None:
+        sweep_deadlines(get_db(), utc_now())
+        fight, err = _fight_from_thread(interaction)
+        if err or fight is None:
+            await interaction.response.send_message(
+                err or "Fight not found.", ephemeral=True
+            )
+            return
+        if actor_advocate_side(fight, interaction.user.id) is None:
+            await interaction.response.send_message(
+                "Only advocates can /reconsider.", ephemeral=True
+            )
+            return
+        evidence_s = (evidence or "").strip()
+        if not evidence_s:
+            await interaction.response.send_message(
+                "Evidence is required for /reconsider (non-empty string).",
+                ephemeral=True,
+            )
+            return
+        if fight.get("status") != RULED_STATUS:
+            await interaction.response.send_message(
+                f"Can only /reconsider a **ruled** fight (status={fight.get('status')!r}).",
+                ephemeral=True,
+            )
+            return
+        reject = _preflight(interaction)
+        if reject:
+            await interaction.response.send_message(reject, ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await edit_deferred_progress(interaction, PROGRESS_JUDGING)
+        try:
+            result = await asyncio.to_thread(
+                reconsider_fight,
+                get_db(),
+                int(fight["id"]),
+                evidence=evidence_s,
+                now=utc_now(),
+                actor_id=interaction.user.id,
+            )
+        except ValueError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(
+                f"Reconsideration failed: {e}", ephemeral=True
+            )
+            return
+        limiter.record(interaction.user.id, interaction.guild_id)
+        try:
+            await drop_reconsideration_messages(
+                thread=interaction.channel,
+                result=result,
+            )
+        except Exception as e:
+            log.warning("reconsideration drop failed: %s", e)
+            await interaction.followup.send(
+                f"Reconsidered, but drop failed: {e}", ephemeral=True
+            )
+            return
+        diff = result.get("diff_line") or ""
+        await interaction.followup.send(
+            f"Reconsideration posted. {diff}".strip()
+        )
 
     @app_commands.command(name="export", description="Export a ruling as a markdown block for paste-anywhere")
     @app_commands.describe(message_id="Discord message ID of the ruling (default: reply/reference or latest you can see)")

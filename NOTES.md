@@ -53,3 +53,9 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 13. **usage_events timings** — Additive columns only (`retrieval_seconds`, `judge_seconds`, `total_seconds`). Full V2 `fights` schema / `fight_id` / balance role deferred to item 2–3. Real `input_tokens`/`output_tokens` from Anthropic `response.usage` when present; flat estimates remain the fallback.
 
 14. **Retrieval parallelism** — Query×source jobs share one `ThreadPoolExecutor`; executor `shutdown(wait=False, cancel_futures=True)` so the 10s wall clock does not wait on stragglers. In-flight urllib calls are not hard-killed (stdlib limitation).
+
+## V2 item 2 (schema migration) — Sept 13 2026
+
+15. **schema_version = 2** — Additive only. V1 `citations` table kept (Phase 3 receipts/exhibits-as-citations); new V2 `exhibits` table is separate. `usage_events` keeps column names `tokens_in`/`tokens_out` (not renamed to input/output) so item 1 booking stays intact; `fight_id` + `role` added nullable.
+
+16. **Out of scope this commit** — state machine, commands, prompt templates, Discord wiring (items 3–13). Gallery `source_role` column exists; no gallery rows created yet (C4).

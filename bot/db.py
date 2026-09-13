@@ -9,6 +9,9 @@ from typing import Any
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "court.db"
 
+# V2 item 2 — additive schema; bump when future migrations land.
+SCHEMA_VERSION = 2
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS rulings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,6 +27,19 @@ CREATE TABLE IF NOT EXISTS rulings (
     franchise TEXT,
     retrieval_status TEXT,
     voided INTEGER NOT NULL DEFAULT 0,
+    fight_id INTEGER,
+    kind TEXT,
+    judge_model TEXT,
+    winner_side TEXT,
+    winner_advocate_id INTEGER,
+    confidence REAL,
+    opening_score_a REAL,
+    opening_score_b REAL,
+    close_score_a REAL,
+    close_score_b REAL,
+    argument_quality REAL,
+    gallery_vote TEXT,
+    transcript_snapshot TEXT,
     FOREIGN KEY (parent_ruling_id) REFERENCES rulings(id)
 );
 
@@ -67,7 +83,76 @@ CREATE TABLE IF NOT EXISTS usage_events (
     retrieval_seconds REAL NOT NULL DEFAULT 0,
     judge_seconds REAL NOT NULL DEFAULT 0,
     total_seconds REAL NOT NULL DEFAULT 0,
+    fight_id INTEGER,
+    role TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    channel_id INTEGER,
+    card_message_id INTEGER,
+    thread_id INTEGER,
+    status TEXT NOT NULL,
+    instant INTEGER NOT NULL DEFAULT 0,
+    open_ended INTEGER NOT NULL DEFAULT 0,
+    challenger_id INTEGER,
+    challengee_id INTEGER,
+    advocate_a_id INTEGER,
+    advocate_b_id INTEGER,
+    side_a TEXT,
+    side_b TEXT,
+    context TEXT,
+    counters_a INTEGER NOT NULL DEFAULT 0,
+    counters_b INTEGER NOT NULL DEFAULT 0,
+    cancel_requested_by INTEGER,
+    balance_score REAL,
+    balance_favored TEXT,
+    balance_reason TEXT,
+    balance_warned INTEGER NOT NULL DEFAULT 0,
+    underdog_accepted INTEGER NOT NULL DEFAULT 0,
+    franchise_a TEXT,
+    franchise_b TEXT,
+    retrieval_status TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT,
+    accepted_at TEXT,
+    rest_a_at TEXT,
+    rest_b_at TEXT,
+    rest_deadline_at TEXT,
+    ruled_at TEXT,
+    archive_at TEXT,
+    season_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS exhibits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fight_id INTEGER NOT NULL,
+    ruling_id INTEGER,
+    message_id INTEGER,
+    author_id INTEGER,
+    source_role TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT,
+    url TEXT,
+    status TEXT NOT NULL,
+    verified_url TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (fight_id) REFERENCES fights(id),
+    FOREIGN KEY (ruling_id) REFERENCES rulings(id)
+);
+
+CREATE TABLE IF NOT EXISTS guild_config (
+    guild_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_rulings_guild_created
@@ -82,7 +167,41 @@ CREATE INDEX IF NOT EXISTS idx_rejudge_status
     ON rejudge_queue(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_month
     ON usage_events(month);
+CREATE INDEX IF NOT EXISTS idx_fights_guild_status
+    ON fights(guild_id, status);
+CREATE INDEX IF NOT EXISTS idx_fights_card_message
+    ON fights(card_message_id);
+CREATE INDEX IF NOT EXISTS idx_exhibits_fight
+    ON exhibits(fight_id);
 """
+
+_RULINGS_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("fight_id", "INTEGER"),
+    ("kind", "TEXT"),
+    ("judge_model", "TEXT"),
+    ("winner_side", "TEXT"),
+    ("winner_advocate_id", "INTEGER"),
+    ("confidence", "REAL"),
+    ("opening_score_a", "REAL"),
+    ("opening_score_b", "REAL"),
+    ("close_score_a", "REAL"),
+    ("close_score_b", "REAL"),
+    ("argument_quality", "REAL"),
+    ("gallery_vote", "TEXT"),
+    ("transcript_snapshot", "TEXT"),
+)
+
+_USAGE_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("retrieval_seconds", "REAL NOT NULL DEFAULT 0"),
+    ("judge_seconds", "REAL NOT NULL DEFAULT 0"),
+    ("total_seconds", "REAL NOT NULL DEFAULT 0"),
+    ("fight_id", "INTEGER"),
+    ("role", "TEXT"),
+)
+
+_FIGHTS_OPTIONAL_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("retrieval_status", "TEXT"),
+)
 
 
 class CourtDB:
@@ -91,40 +210,284 @@ class CourtDB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
         self._migrate()
         self._conn.commit()
 
+    def _table_columns(self, table: str) -> set[str]:
+        return {
+            r["name"]
+            for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    def _add_columns_if_missing(
+        self, table: str, columns: tuple[tuple[str, str], ...]
+    ) -> None:
+        existing = self._table_columns(table)
+        for name, decl in columns:
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
     def _migrate(self) -> None:
-        """Add columns introduced in Phase 3 / V2 item 1 to existing DBs."""
-        cols = {
-            r["name"]
-            for r in self._conn.execute("PRAGMA table_info(rulings)").fetchall()
-        }
-        if "franchise" not in cols:
-            self._conn.execute("ALTER TABLE rulings ADD COLUMN franchise TEXT")
-        if "retrieval_status" not in cols:
-            self._conn.execute("ALTER TABLE rulings ADD COLUMN retrieval_status TEXT")
-        if "voided" not in cols:
+        """Additive Phase 3 / V2 migrations guarded by schema_version."""
+        # Phase 3 columns on pre-Phase-3 DBs (also covered by CREATE IF NOT EXISTS
+        # on fresh DBs that already include them in _SCHEMA).
+        self._add_columns_if_missing(
+            "rulings",
+            (
+                ("franchise", "TEXT"),
+                ("retrieval_status", "TEXT"),
+                ("voided", "INTEGER NOT NULL DEFAULT 0"),
+            ),
+        )
+        self._add_columns_if_missing("rulings", _RULINGS_V2_COLUMNS)
+        self._add_columns_if_missing("usage_events", _USAGE_V2_COLUMNS)
+        # fights may exist from an older partial migration without retrieval_status
+        if "fights" in {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }:
+            self._add_columns_if_missing("fights", _FIGHTS_OPTIONAL_COLUMNS)
+
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rulings_fight ON rulings(fight_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_fight ON usage_events(fight_id)"
+        )
+
+        row = self._conn.execute(
+            "SELECT version FROM schema_version LIMIT 1"
+        ).fetchone()
+        if row is None:
             self._conn.execute(
-                "ALTER TABLE rulings ADD COLUMN voided INTEGER NOT NULL DEFAULT 0"
+                "INSERT INTO schema_version (version) VALUES (?)",
+                (SCHEMA_VERSION,),
             )
-        usage_cols = {
-            r["name"]
-            for r in self._conn.execute("PRAGMA table_info(usage_events)").fetchall()
-        }
-        for col, decl in (
-            ("retrieval_seconds", "REAL NOT NULL DEFAULT 0"),
-            ("judge_seconds", "REAL NOT NULL DEFAULT 0"),
-            ("total_seconds", "REAL NOT NULL DEFAULT 0"),
-        ):
-            if col not in usage_cols:
-                self._conn.execute(
-                    f"ALTER TABLE usage_events ADD COLUMN {col} {decl}"
-                )
+        elif int(row["version"]) < SCHEMA_VERSION:
+            self._conn.execute(
+                "UPDATE schema_version SET version = ?",
+                (SCHEMA_VERSION,),
+            )
 
     def close(self) -> None:
         self._conn.close()
+
+    def get_schema_version(self) -> int:
+        row = self._conn.execute(
+            "SELECT version FROM schema_version LIMIT 1"
+        ).fetchone()
+        return int(row["version"]) if row else 0
+
+    # --- fights -----------------------------------------------------------
+
+    def create_fight(
+        self,
+        *,
+        guild_id: int | None = None,
+        channel_id: int | None = None,
+        card_message_id: int | None = None,
+        thread_id: int | None = None,
+        status: str = "proposed",
+        instant: bool = False,
+        open_ended: bool = False,
+        challenger_id: int | None = None,
+        challengee_id: int | None = None,
+        advocate_a_id: int | None = None,
+        advocate_b_id: int | None = None,
+        side_a: str | None = None,
+        side_b: str | None = None,
+        context: str | None = None,
+        counters_a: int = 0,
+        counters_b: int = 0,
+        cancel_requested_by: int | None = None,
+        balance_score: float | None = None,
+        balance_favored: str | None = None,
+        balance_reason: str | None = None,
+        balance_warned: bool = False,
+        underdog_accepted: bool = False,
+        franchise_a: str | None = None,
+        franchise_b: str | None = None,
+        retrieval_status: str | None = None,
+        expires_at: str | None = None,
+        accepted_at: str | None = None,
+        rest_a_at: str | None = None,
+        rest_b_at: str | None = None,
+        rest_deadline_at: str | None = None,
+        ruled_at: str | None = None,
+        archive_at: str | None = None,
+        season_id: int | None = None,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO fights (
+                guild_id, channel_id, card_message_id, thread_id,
+                status, instant, open_ended,
+                challenger_id, challengee_id, advocate_a_id, advocate_b_id,
+                side_a, side_b, context, counters_a, counters_b,
+                cancel_requested_by, balance_score, balance_favored, balance_reason,
+                balance_warned, underdog_accepted, franchise_a, franchise_b,
+                retrieval_status, expires_at, accepted_at, rest_a_at, rest_b_at,
+                rest_deadline_at, ruled_at, archive_at, season_id
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?
+            )
+            """,
+            (
+                guild_id,
+                channel_id,
+                card_message_id,
+                thread_id,
+                status,
+                1 if instant else 0,
+                1 if open_ended else 0,
+                challenger_id,
+                challengee_id,
+                advocate_a_id,
+                advocate_b_id,
+                side_a,
+                side_b,
+                context,
+                counters_a,
+                counters_b,
+                cancel_requested_by,
+                balance_score,
+                balance_favored,
+                balance_reason,
+                1 if balance_warned else 0,
+                1 if underdog_accepted else 0,
+                franchise_a,
+                franchise_b,
+                retrieval_status,
+                expires_at,
+                accepted_at,
+                rest_a_at,
+                rest_b_at,
+                rest_deadline_at,
+                ruled_at,
+                archive_at,
+                season_id,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def get_fight(self, fight_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM fights WHERE id = ?", (fight_id,)
+        ).fetchone()
+        return self._row_to_fight(row) if row else None
+
+    def update_fight(self, fight_id: int, **fields: Any) -> None:
+        """Patch fight columns. Bool fields are stored as 0/1."""
+        if not fields:
+            return
+        bool_cols = {
+            "instant",
+            "open_ended",
+            "balance_warned",
+            "underdog_accepted",
+        }
+        cols: list[str] = []
+        vals: list[Any] = []
+        for key, value in fields.items():
+            if key in bool_cols and value is not None:
+                value = 1 if value else 0
+            cols.append(f"{key} = ?")
+            vals.append(value)
+        vals.append(fight_id)
+        self._conn.execute(
+            f"UPDATE fights SET {', '.join(cols)} WHERE id = ?",
+            vals,
+        )
+        self._conn.commit()
+
+    # --- exhibits ---------------------------------------------------------
+
+    def insert_exhibit(
+        self,
+        *,
+        fight_id: int,
+        source_role: str,
+        kind: str,
+        status: str,
+        ruling_id: int | None = None,
+        message_id: int | None = None,
+        author_id: int | None = None,
+        text: str | None = None,
+        url: str | None = None,
+        verified_url: str | None = None,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO exhibits (
+                fight_id, ruling_id, message_id, author_id,
+                source_role, kind, text, url, status, verified_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fight_id,
+                ruling_id,
+                message_id,
+                author_id,
+                source_role,
+                kind,
+                text,
+                url,
+                status,
+                verified_url,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def list_exhibits(self, fight_id: int) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM exhibits WHERE fight_id = ? ORDER BY id ASC",
+            (fight_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- guild_config -----------------------------------------------------
+
+    def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO guild_config (guild_id, key, value, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(guild_id, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = datetime('now')
+            """,
+            (guild_id, key, value),
+        )
+        self._conn.commit()
+
+    def get_guild_config(self, guild_id: int, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM guild_config WHERE guild_id = ? AND key = ?",
+            (guild_id, key),
+        ).fetchone()
+        return str(row["value"]) if row else None
+
+    def list_guild_config(self, guild_id: int) -> dict[str, str]:
+        rows = self._conn.execute(
+            "SELECT key, value FROM guild_config WHERE guild_id = ? ORDER BY key",
+            (guild_id,),
+        ).fetchall()
+        return {str(r["key"]): str(r["value"]) for r in rows}
+
+    # --- rulings (V1 + V2 extensions) -------------------------------------
 
     def insert_ruling(
         self,
@@ -140,14 +503,37 @@ class CourtDB:
         franchise: str | None = None,
         retrieval_status: str | None = None,
         voided: bool = False,
+        fight_id: int | None = None,
+        kind: str | None = None,
+        judge_model: str | None = None,
+        winner_side: str | None = None,
+        winner_advocate_id: int | None = None,
+        confidence: float | None = None,
+        opening_score_a: float | None = None,
+        opening_score_b: float | None = None,
+        close_score_a: float | None = None,
+        close_score_b: float | None = None,
+        argument_quality: float | None = None,
+        gallery_vote: str | None = None,
+        transcript_snapshot: Any | None = None,
     ) -> int:
+        snap = transcript_snapshot
+        if snap is not None and not isinstance(snap, str):
+            snap = json.dumps(snap)
         cur = self._conn.execute(
             """
             INSERT INTO rulings (
                 message_id, channel_id, guild_id,
                 fighter_a, fighter_b, context, verdict, parent_ruling_id,
-                franchise, retrieval_status, voided
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                franchise, retrieval_status, voided,
+                fight_id, kind, judge_model, winner_side, winner_advocate_id,
+                confidence, opening_score_a, opening_score_b,
+                close_score_a, close_score_b, argument_quality,
+                gallery_vote, transcript_snapshot
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 message_id,
@@ -161,6 +547,19 @@ class CourtDB:
                 franchise,
                 retrieval_status,
                 1 if voided else 0,
+                fight_id,
+                kind,
+                judge_model,
+                winner_side,
+                winner_advocate_id,
+                confidence,
+                opening_score_a,
+                opening_score_b,
+                close_score_a,
+                close_score_b,
+                argument_quality,
+                gallery_vote,
+                snap,
             ),
         )
         self._conn.commit()
@@ -322,14 +721,17 @@ class CourtDB:
         retrieval_seconds: float = 0.0,
         judge_seconds: float = 0.0,
         total_seconds: float = 0.0,
+        fight_id: int | None = None,
+        role: str | None = None,
     ) -> int:
         cur = self._conn.execute(
             """
             INSERT INTO usage_events (
                 month, tokens_in, tokens_out, estimated_usd,
-                retrieval_seconds, judge_seconds, total_seconds
+                retrieval_seconds, judge_seconds, total_seconds,
+                fight_id, role
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 month,
@@ -339,6 +741,8 @@ class CourtDB:
                 float(retrieval_seconds or 0.0),
                 float(judge_seconds or 0.0),
                 float(total_seconds or 0.0),
+                fight_id,
+                role,
             ),
         )
         self._conn.commit()
@@ -356,6 +760,20 @@ class CourtDB:
         d = dict(row)
         d["verdict"] = json.loads(d["verdict"])
         d["voided"] = bool(d.get("voided") or 0)
+        snap = d.get("transcript_snapshot")
+        if isinstance(snap, str) and snap:
+            try:
+                d["transcript_snapshot"] = json.loads(snap)
+            except json.JSONDecodeError:
+                pass
+        return d
+
+    @staticmethod
+    def _row_to_fight(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        for key in ("instant", "open_ended", "balance_warned", "underdog_accepted"):
+            if key in d:
+                d[key] = bool(d[key] or 0)
         return d
 
 

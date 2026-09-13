@@ -59,3 +59,22 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 15. **schema_version = 2** — Additive only. V1 `citations` table kept (Phase 3 receipts/exhibits-as-citations); new V2 `exhibits` table is separate. `usage_events` keeps column names `tokens_in`/`tokens_out` (not renamed to input/output) so item 1 booking stays intact; `fight_id` + `role` added nullable.
 
 16. **Out of scope this commit** — state machine, commands, prompt templates, Discord wiring (items 3–13). Gallery `source_role` column exists; no gallery rows created yet (C4).
+
+## V2 item 3 (prompts + balance) — Sept 13 2026
+
+17. **Prompt templates on disk** — `prompts/referee.md` + `prompts/balance.md`
+    loaded via `bot/prompts.py` (`{{HOUSE_RULES}}` / `{{LAWS}}` / fight slots).
+    Missing file raises `PromptTemplateError` with the expected path.
+
+18. **deliver_verdict soft migration** — Tool schema is V2 field order with
+    `winner_side`; opening/close/argument_quality nullable (Amendment 11).
+    `validate_verdict` still accepts V1 CLI payloads (`matchup` + `winner`) and
+    maps `winner_side` ↔ `winner` so instant/CLI stays green.
+
+19. **balance_read** — Haiku tool + `balance_read()` / `judge_balance` helper
+    (mockable client). Franchise keys normalized through alias map after return
+    (Q5); unmapped/empty → that side unlisted for later retrieval routing.
+    Discord challenge-card wiring deferred to item 4c.
+
+20. **Out of scope this commit** — challenge card / state machine UX (4a–4c),
+    retrieve-at-accept (5), transcript assembly, ruling drop (7–8).

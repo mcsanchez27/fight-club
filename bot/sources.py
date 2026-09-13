@@ -98,6 +98,23 @@ def detect_franchise(
     return best[1] if best else None
 
 
+def normalize_franchise_key(
+    raw: str | None,
+    cfg: dict[str, Any] | None = None,
+) -> str | None:
+    """Map free-text franchise (from balance_read) → allowlist key.
+
+    Uses the same alias/label/key matching as detect_franchise. Unmapped → None
+    (treat that side as unlisted / legal-plea for retrieval routing).
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    return detect_franchise("", "", franchise_hint=text, cfg=cfg)
+
+
 def _alias_in_text(alias: str, hay: str) -> bool:
     """Whole-token match; multi-word aliases still match as a phrase."""
     if not alias or not hay:

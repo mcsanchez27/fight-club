@@ -6,7 +6,9 @@ import pytest
 
 from bot.judge import (
     DELIVER_VERDICT_TOOL,
+    VERDICT_FIELD_ORDER,
     VERDICT_REQUIRED_FIELDS,
+    VERDICT_TOOL_REQUIRED_FIELDS,
     _extract_tool_verdict,
     _judge_anthropic,
     validate_verdict,
@@ -30,6 +32,7 @@ def _valid(**overrides):
 
 
 def test_required_fields_are_steelman_first() -> None:
+    # V1 soft-compat field tuple still steelman-before-ruling.
     order = list(VERDICT_REQUIRED_FIELDS)
     assert order.index("steelman_a") < order.index("ruling")
     assert order.index("steelman_b") < order.index("ruling")
@@ -38,14 +41,22 @@ def test_required_fields_are_steelman_first() -> None:
     assert order.index("ruling") < order.index("winner")
     assert order.index("winner") < order.index("confidence")
     assert order.index("confidence") < order.index("citations")
+    # V2 tool order likewise.
+    v2 = list(VERDICT_FIELD_ORDER)
+    assert v2.index("steelman_a") < v2.index("ruling")
+    assert v2.index("exhibit_ledger") < v2.index("ruling")
+    assert v2.index("ruling") < v2.index("winner_side")
 
 
 def test_deliver_verdict_tool_schema_matches_required() -> None:
     assert DELIVER_VERDICT_TOOL["name"] == "deliver_verdict"
     schema = DELIVER_VERDICT_TOOL["input_schema"]
-    assert schema["required"] == list(VERDICT_REQUIRED_FIELDS)
-    for key in VERDICT_REQUIRED_FIELDS:
+    assert schema["required"] == list(VERDICT_TOOL_REQUIRED_FIELDS)
+    for key in VERDICT_TOOL_REQUIRED_FIELDS:
         assert key in schema["properties"]
+    # V1 soft keys still present for instant/CLI
+    assert "matchup" in schema["properties"]
+    assert "winner" in schema["properties"]
 
 
 def test_validate_verdict_ok() -> None:

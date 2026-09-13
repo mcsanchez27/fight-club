@@ -8,8 +8,14 @@ import time
 from typing import Any
 
 from bot.laws import get_laws
+from bot.prompts import (
+    HOUSE_RULES_BLOCK,
+    PromptTemplateError,
+    render_balance_prompt,
+    render_referee_prompt,
+)
 from bot.retrieval import RetrievalResult, pack_retrieval_for_prompt, retrieve
-from bot.sources import cap_snippet, is_stale
+from bot.sources import cap_snippet, is_stale, normalize_franchise_key
 
 # Model routing (Tech Design §4 / §9). Balance helper wired for item 3.
 DEFAULT_MODEL_RULING = "claude-sonnet-5"
@@ -43,7 +49,54 @@ def make_anthropic_client():
     )
 
 
-# Schema field order is intentional: steelman / concede / unknowns before the ruling.
+# V2 deliver_verdict field order (Tech Design §4). Steelman before ruling is hard.
+VERDICT_FIELD_ORDER = (
+    "steelman_a",
+    "steelman_b",
+    "exhibit_ledger",
+    "concessions",
+    "unknowns",
+    "opening_score_a",
+    "opening_score_b",
+    "close_score_a",
+    "close_score_b",
+    "ruling",
+    "winner_side",
+    "confidence",
+    "argument_quality",
+    "citations",
+)
+
+# Tool-required fields (Amendment 11: capture scores are NOT required).
+VERDICT_TOOL_REQUIRED_FIELDS = (
+    "steelman_a",
+    "steelman_b",
+    "exhibit_ledger",
+    "concessions",
+    "unknowns",
+    "ruling",
+    "winner_side",
+    "confidence",
+    "citations",
+)
+
+# Soft-required core for validation (winner OR winner_side). V1 matchup optional.
+VERDICT_CORE_REQUIRED = (
+    "steelman_a",
+    "steelman_b",
+    "ruling",
+    "confidence",
+)
+
+NULLABLE_SCORE_FIELDS = (
+    "opening_score_a",
+    "opening_score_b",
+    "close_score_a",
+    "close_score_b",
+    "argument_quality",
+)
+
+# Back-compat alias used by older tests / imports (V1 field set; still accepted).
 VERDICT_REQUIRED_FIELDS = (
     "matchup",
     "steelman_a",
@@ -63,6 +116,7 @@ CITATION_OBJECT_SCHEMA: dict[str, Any] = {
         "source_url": {"type": "string"},
         "locator": {"type": "string"},
         "snippet": {"type": "string", "description": "≤25 words; no full quotes"},
+        "retrieval_id": {"type": "string"},
         "verified": {"type": "boolean"},
         "kind": {"type": "string", "description": "receipt or exhibit"},
         "retrieved_at": {"type": "string"},
@@ -70,36 +124,77 @@ CITATION_OBJECT_SCHEMA: dict[str, Any] = {
     "required": ["claim"],
 }
 
+EXHIBIT_LEDGER_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "exhibit_id": {"type": "string"},
+        "status": {
+            "type": "string",
+            "description": "verified | unverified | contested",
+        },
+        "weight_note": {"type": "string"},
+    },
+    "required": ["exhibit_id", "status"],
+}
+
 VERDICT_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "matchup": {"type": "string", "description": "The matchup label, e.g. 'A vs B'"},
         "steelman_a": {
             "type": "string",
-            "description": "Strongest case for fighter A, before ruling",
+            "description": "Strongest case for side A, before ruling",
         },
         "steelman_b": {
             "type": "string",
-            "description": "Strongest case for fighter B, before ruling",
+            "description": "Strongest case for side B, before ruling",
+        },
+        "exhibit_ledger": {
+            "type": "array",
+            "items": EXHIBIT_LEDGER_ITEM_SCHEMA,
+            "description": "Per-exhibit status and weight notes",
         },
         "concessions": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Genuine advantages conceded to either side (load-bearing; cite receipts)",
+            "description": "Genuine advantages conceded to either side",
         },
         "unknowns": {
             "type": "array",
             "items": {"type": "string"},
             "description": "Material the court does not know; legal pleas, not losses",
         },
+        "opening_score_a": {
+            "type": ["number", "null"],
+            "description": "Opening argument quality for A, 1–10 (nullable)",
+        },
+        "opening_score_b": {
+            "type": ["number", "null"],
+            "description": "Opening argument quality for B, 1–10 (nullable)",
+        },
+        "close_score_a": {
+            "type": ["number", "null"],
+            "description": "Closing argument quality for A, 1–10 (nullable)",
+        },
+        "close_score_b": {
+            "type": ["number", "null"],
+            "description": "Closing argument quality for B, 1–10 (nullable)",
+        },
         "ruling": {
             "type": "string",
-            "description": "2-4 sentence ruling after steelmans and concessions (load-bearing; cite receipts)",
+            "description": "2-4 sentence ruling after steelmans and concessions",
         },
-        "winner": {"type": "string", "description": "Who wins"},
+        "winner_side": {
+            "type": "string",
+            "enum": ["a", "b"],
+            "description": "Winning side — a tie is not an output",
+        },
         "confidence": {
             "type": "number",
-            "description": "Confidence 0-10 (capped at 5 if retrieval unavailable)",
+            "description": "Confidence 0-10, one decimal (capped at 5 if retrieval unavailable)",
+        },
+        "argument_quality": {
+            "type": ["number", "null"],
+            "description": "Overall advocacy quality 1–10 (nullable)",
         },
         "citations": {
             "type": "array",
@@ -109,90 +204,123 @@ VERDICT_INPUT_SCHEMA: dict[str, Any] = {
                     CITATION_OBJECT_SCHEMA,
                 ]
             },
-            "description": "Structured receipts/exhibits preferred; strings accepted and normalized",
+            "description": "Structured receipts/exhibits; strings accepted and normalized",
         },
+        # V1 / instant soft-compat (optional; not in V2 required order)
+        "matchup": {"type": "string", "description": "Optional matchup label (V1/instant)"},
+        "winner": {"type": "string", "description": "Optional free-text winner (V1); prefer winner_side"},
     },
-    "required": list(VERDICT_REQUIRED_FIELDS),
+    "required": list(VERDICT_TOOL_REQUIRED_FIELDS),
 }
 
 DELIVER_VERDICT_TOOL: dict[str, Any] = {
     "type": "custom",
     "name": "deliver_verdict",
     "description": (
-        "Deliver the court's structured verdict. Call this once with steelmans, "
-        "concessions, and unknowns filled before ruling/winner/confidence. "
-        "Receipts are required for the ruling and every concession; optional for steelmans."
+        "Deliver the court's structured verdict. Call this once. "
+        "Steelman_a, steelman_b, exhibit_ledger, concessions, and unknowns "
+        "MUST be filled before ruling / winner_side / confidence. "
+        "Opening/close/argument_quality may be null if the record is thin. "
+        "Receipts are required for the ruling and every concession."
     ),
     "input_schema": VERDICT_INPUT_SCHEMA,
 }
 
-HOUSE_RULES = """\
-HOUSE RULES
-1. Steelman first — present each side's strongest case before ruling.
-2. Concede what's earned — acknowledge genuine advantages without hedging.
-3. Canon citations beat vibes. "I don't know that material" is a legal plea, \
-not a loss; put unknowns in the unknowns list.
-4. Rulings carry confidence X/10 and are revisable on new evidence.
-5. Traps are legal — clever setup, environment abuse, and prep are valid.
-6. The migraine gets the final say. Court recesses whenever the King calls it.
-"""
+BALANCE_READ_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "score": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 10,
+            "description": "1–10; 10 = even",
+        },
+        "favored_side": {
+            "type": "string",
+            "enum": ["a", "b", "even"],
+        },
+        "reason": {
+            "type": "string",
+            "description": "≤25 words",
+        },
+        "franchise_a": {
+            "type": "string",
+            "description": "Free-text franchise for side A (normalized after return)",
+        },
+        "franchise_b": {
+            "type": "string",
+            "description": "Free-text franchise for side B (normalized after return)",
+        },
+    },
+    "required": ["score", "favored_side", "reason", "franchise_a", "franchise_b"],
+}
 
-RECEIPTS_RULES = """\
-RECEIPTS RULES
-- Autonomous fetches are RECEIPTS; user-pasted text is EXHIBITS.
-- Receipts are load-bearing for the ruling and every concession; optional for steelmans.
-- Prefer citing packed retrieval_ids. Never invent URLs.
-- Snippets ≤25 words. No full quotes.
-- If retrieval is unavailable/unlisted, still rule; put gaps in unknowns; keep confidence ≤5.
-"""
+BALANCE_READ_TOOL: dict[str, Any] = {
+    "type": "custom",
+    "name": "balance_read",
+    "description": (
+        "Return a pre-fight balance read for the challenge card. "
+        "Call once. score 10 = even; favored_side a|b|even; reason ≤25 words; "
+        "franchise_a/franchise_b are free-text labels for retrieval routing."
+    ),
+    "input_schema": BALANCE_READ_INPUT_SCHEMA,
+}
+
+# Re-export for callers that previously imported HOUSE_RULES from judge.
+HOUSE_RULES = HOUSE_RULES_BLOCK
 
 
-def _laws_block() -> str:
-    laws = get_laws().strip()
-    if not laws:
-        return ""
-    return "\nLAWS OF THE COURT (cite by name when applicable)\n" + laws + "\n"
-
-
-def build_system_prompt() -> str:
-    return (
-        "You are Fight Club Court — a sharp analytical debate judge for fiction and "
-        "death-battle matchups. You price logistics, character flaws, and win conditions, "
-        "not just power levels. Tone: precise, cutting, fair.\n\n"
-        f"{HOUSE_RULES}"
-        f"{RECEIPTS_RULES}"
-        f"{_laws_block()}"
-        "Deliver the verdict by calling the deliver_verdict tool. Fill steelman_a, "
-        "steelman_b, concessions, and unknowns before ruling, winner, confidence, and citations.\n"
+def build_system_prompt(
+    *,
+    fight_setup: str = "",
+    receipts: str = "",
+    transcript: str = "",
+    exhibit_ledger: str = "",
+    prior_ruling: str = "",
+) -> str:
+    """Referee system prompt from prompts/referee.md (House Rules + Laws injected)."""
+    return render_referee_prompt(
+        laws=get_laws(),
+        house_rules=HOUSE_RULES_BLOCK,
+        fight_setup=fight_setup,
+        receipts=receipts,
+        transcript=transcript,
+        exhibit_ledger=exhibit_ledger,
+        prior_ruling=prior_ruling,
     )
 
 
-def build_system_prompt_openai() -> str:
+def build_system_prompt_openai(
+    *,
+    fight_setup: str = "",
+    receipts: str = "",
+    transcript: str = "",
+    exhibit_ledger: str = "",
+    prior_ruling: str = "",
+) -> str:
+    """OpenAI fallback: same disk template + JSON object instruction (V1 soft path)."""
+    base = build_system_prompt(
+        fight_setup=fight_setup,
+        receipts=receipts,
+        transcript=transcript,
+        exhibit_ledger=exhibit_ledger,
+        prior_ruling=prior_ruling,
+    )
     return (
-        "You are Fight Club Court — a sharp analytical debate judge for fiction and "
-        "death-battle matchups. You price logistics, character flaws, and win conditions, "
-        "not just power levels. Tone: precise, cutting, fair.\n\n"
-        f"{HOUSE_RULES}"
-        f"{RECEIPTS_RULES}"
-        f"{_laws_block()}"
-        "Respond with ONLY a single JSON object matching this schema:\n"
-        "{\n"
-        '  "matchup": string,\n'
-        '  "steelman_a": string,\n'
-        '  "steelman_b": string,\n'
-        '  "concessions": [string],\n'
-        '  "unknowns": [string],\n'
-        '  "ruling": string (2-4 sentences),\n'
-        '  "winner": string,\n'
-        '  "confidence": number 0-10,\n'
-        '  "citations": [string | {claim, source_url, locator, snippet, verified, kind}]\n'
-        "}\n"
+        base
+        + "\nRespond with ONLY a single JSON object matching the deliver_verdict "
+        "fields (steelman before ruling). Include winner_side ('a'|'b') or winner; "
+        "opening/close/argument_quality may be null.\n"
     )
 
 
-# Back-compat names used in tests / imports
-SYSTEM_PROMPT = build_system_prompt()  # may be empty-laws until load_laws()
-SYSTEM_PROMPT_OPENAI = build_system_prompt_openai()
+# Back-compat names used in tests / imports (loaded from disk at import time).
+try:
+    SYSTEM_PROMPT = build_system_prompt()
+    SYSTEM_PROMPT_OPENAI = build_system_prompt_openai()
+except PromptTemplateError:
+    SYSTEM_PROMPT = ""
+    SYSTEM_PROMPT_OPENAI = ""
 
 UNVERIFIED_CONFIDENCE_CAP = 5.0
 
@@ -205,6 +333,7 @@ def normalize_citation(item: Any) -> dict[str, Any]:
             "source_url": "",
             "locator": "",
             "snippet": cap_snippet(item),
+            "retrieval_id": "",
             "verified": False,
             "kind": "receipt",
             "retrieved_at": "",
@@ -215,6 +344,7 @@ def normalize_citation(item: Any) -> dict[str, Any]:
             "source_url": str(item.get("source_url") or item.get("url") or ""),
             "locator": str(item.get("locator") or ""),
             "snippet": cap_snippet(str(item.get("snippet") or item.get("quote") or "")),
+            "retrieval_id": str(item.get("retrieval_id") or ""),
             "verified": bool(item.get("verified", False)),
             "kind": str(item.get("kind") or "receipt"),
             "retrieved_at": str(item.get("retrieved_at") or ""),
@@ -230,28 +360,109 @@ def normalize_citation(item: Any) -> dict[str, Any]:
         "source_url": "",
         "locator": "",
         "snippet": "",
+        "retrieval_id": "",
         "verified": False,
         "kind": "receipt",
         "retrieved_at": "",
     }
 
 
+def _coerce_optional_score(value: Any) -> float | None:
+    """Nullable 1–10 capture score (Amendment 11 — missing must not fail)."""
+    if value is None or value == "":
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    return n
+
+
+def _map_winner_fields(out: dict[str, Any]) -> None:
+    """Keep winner (V1/CLI) and winner_side (V2) in sync when possible."""
+    side = out.get("winner_side")
+    winner = out.get("winner")
+    if side is not None and str(side).strip():
+        side_l = str(side).strip().lower()
+        if side_l in {"a", "b"}:
+            out["winner_side"] = side_l
+            if not winner:
+                out["winner"] = side_l.upper()
+            return
+    if winner is not None and str(winner).strip():
+        w = str(winner).strip()
+        out["winner"] = w
+        wl = w.lower()
+        if wl in {"a", "b"} and not side:
+            out["winner_side"] = wl
+        elif not side:
+            # Free-text V1 winner — leave winner_side unset for soft path.
+            out.setdefault("winner_side", None)
+        return
+    raise ValueError("Verdict missing required field: winner_side (or winner)")
+
+
 def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
-    """Validate and normalize a verdict dict."""
+    """Validate and normalize a verdict dict (V2 soft migration + V1 CLI).
+
+    Core required: steelman_a/b, ruling, confidence, and winner_side or winner.
+    Amendment 11: opening/close/argument_quality may be missing → null.
+    V1 fields (matchup, winner, string citations) still accepted.
+    """
     if not isinstance(data, dict):
         raise ValueError("Verdict must be a dict")
-    for key in VERDICT_REQUIRED_FIELDS:
+    for key in VERDICT_CORE_REQUIRED:
         if key not in data:
             raise ValueError(f"Verdict missing required field: {key}")
     out = dict(data)
+    _map_winner_fields(out)
+
     out["confidence"] = float(out["confidence"])
+    # Round display-style one-decimal guidance without rejecting ints.
+    out["confidence"] = round(out["confidence"], 1)
+
     for list_key in ("concessions", "unknowns"):
-        if not isinstance(out[list_key], list):
+        if list_key not in out or out[list_key] is None:
+            out[list_key] = []
+        elif not isinstance(out[list_key], list):
             out[list_key] = [str(out[list_key])]
-    raw_cites = out["citations"]
-    if not isinstance(raw_cites, list):
-        raw_cites = [raw_cites]
+
+    if "exhibit_ledger" not in out or out["exhibit_ledger"] is None:
+        out["exhibit_ledger"] = []
+    elif not isinstance(out["exhibit_ledger"], list):
+        out["exhibit_ledger"] = [out["exhibit_ledger"]]
+    ledger: list[dict[str, Any]] = []
+    for item in out["exhibit_ledger"]:
+        if isinstance(item, dict):
+            ledger.append(
+                {
+                    "exhibit_id": str(item.get("exhibit_id") or ""),
+                    "status": str(item.get("status") or "unverified"),
+                    "weight_note": str(item.get("weight_note") or ""),
+                }
+            )
+        else:
+            ledger.append(
+                {"exhibit_id": str(item), "status": "unverified", "weight_note": ""}
+            )
+    out["exhibit_ledger"] = ledger
+
+    for score_key in NULLABLE_SCORE_FIELDS:
+        if score_key not in out:
+            out[score_key] = None
+        else:
+            out[score_key] = _coerce_optional_score(out.get(score_key))
+
+    if "citations" not in out or out["citations"] is None:
+        raw_cites: list[Any] = []
+    else:
+        raw_cites = out["citations"]
+        if not isinstance(raw_cites, list):
+            raw_cites = [raw_cites]
     out["citations"] = [normalize_citation(c) for c in raw_cites]
+
+    if "matchup" not in out or out["matchup"] is None:
+        out["matchup"] = ""
     return out
 
 
@@ -405,6 +616,105 @@ def _judge_openai(user_msg: str) -> dict[str, Any]:
     return _attach_usage(verdict, {"input_tokens": 0, "output_tokens": 0})
 
 
+def validate_balance(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate balance_read tool payload and normalize franchise keys (Q5)."""
+    if not isinstance(data, dict):
+        raise ValueError("Balance read must be a dict")
+    for key in ("score", "favored_side", "reason", "franchise_a", "franchise_b"):
+        if key not in data:
+            raise ValueError(f"Balance read missing required field: {key}")
+    out = dict(data)
+    score = float(out["score"])
+    if score < 1 or score > 10:
+        raise ValueError("Balance score must be between 1 and 10")
+    out["score"] = score
+    side = str(out["favored_side"]).strip().lower()
+    if side not in {"a", "b", "even"}:
+        raise ValueError("favored_side must be 'a', 'b', or 'even'")
+    out["favored_side"] = side
+    out["reason"] = cap_snippet(str(out.get("reason") or ""), 25)
+
+    raw_a = "" if out.get("franchise_a") is None else str(out.get("franchise_a"))
+    raw_b = "" if out.get("franchise_b") is None else str(out.get("franchise_b"))
+    out["franchise_a_raw"] = raw_a.strip()
+    out["franchise_b_raw"] = raw_b.strip()
+    key_a = normalize_franchise_key(raw_a)
+    key_b = normalize_franchise_key(raw_b)
+    out["franchise_a"] = key_a  # None → unlisted / plea for that side
+    out["franchise_b"] = key_b
+    out["franchise_a_unlisted"] = key_a is None and bool(raw_a.strip())
+    out["franchise_b_unlisted"] = key_b is None and bool(raw_b.strip())
+    # Empty raw also counts as unlisted for retrieval routing.
+    if not raw_a.strip():
+        out["franchise_a_unlisted"] = True
+    if not raw_b.strip():
+        out["franchise_b_unlisted"] = True
+    return out
+
+
+def _extract_balance_tool(resp: Any) -> dict[str, Any]:
+    for block in resp.content:
+        btype = getattr(block, "type", None)
+        if btype == "tool_use" and getattr(block, "name", None) == "balance_read":
+            return validate_balance(dict(block.input))
+    raise ValueError("Anthropic response missing balance_read tool use")
+
+
+def balance_read(
+    side_a: str,
+    side_b: str,
+    context: str | None = None,
+    *,
+    client: Any | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Pre-fight balance check via Haiku + balance_read tool.
+
+    Callable helper for item 4c challenge cards. Mock ``client`` in tests
+    (any object with ``messages.create``). No Discord wiring.
+    """
+    matchup = f"{side_a} vs {side_b}"
+    user_msg = render_balance_prompt(matchup=matchup, context=context)
+    # System is intentionally short; the template already carries instructions.
+    system = (
+        "You are the Fight Club balance reader. Call balance_read once. "
+        "Do not rule the fight."
+    )
+    use_model = model or balance_model()
+    anthropic_client = client if client is not None else make_anthropic_client()
+
+    def _call() -> tuple[dict[str, Any], dict[str, int]]:
+        try:
+            resp = anthropic_client.messages.create(
+                model=use_model,
+                system=system,
+                messages=[{"role": "user", "content": user_msg}],
+                max_tokens=512,
+                temperature=0.2,
+                tools=[BALANCE_READ_TOOL],
+                tool_choice={"type": "tool", "name": "balance_read"},
+            )
+        except Exception as e:
+            raise RuntimeError(f"Balance read request failed: {e}") from e
+        return _extract_balance_tool(resp), _usage_from_response(resp)
+
+    try:
+        result, usage = _call()
+    except ValueError:
+        result, usage = _call()
+    result["_usage"] = {
+        **usage,
+        "role": "balance",
+        "model": use_model,
+    }
+    return result
+
+
+# Alias for callers / docs that prefer judge_balance naming.
+judge_balance = balance_read
+
+
+
 def judge(
     fighter_a: str,
     fighter_b: str,
@@ -518,7 +828,7 @@ def format_verdict_text(v: dict[str, Any]) -> str:
         [
             "",
             f"Ruling: {v['ruling']}",
-            f"Winner:   {v['winner']}",
+            f"Winner:   {v.get('winner') or v.get('winner_side') or '?'}",
             f"Confidence: {v['confidence']}/10",
         ]
     )

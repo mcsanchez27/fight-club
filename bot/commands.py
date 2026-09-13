@@ -23,9 +23,16 @@ from bot.export import export_markdown
 from bot.fights import (
     MISSING_FIGHT_PROMPT,
     accept_fight,
+    apply_balance_to_fight,
+    button_holder_id,
+    counter_button_label,
+    counter_fight,
     create_proposed_fight,
     decline_fight,
     expire_due_fights,
+    fill_open_ended_accept,
+    is_balance_free_counter_eligible,
+    sides_complete,
     utc_now,
     validate_fight_fields,
 )
@@ -257,10 +264,152 @@ def _fight_id_from_custom_id(custom_id: str | None, prefix: str) -> int | None:
         return None
 
 
-class ChallengeCardView(discord.ui.View):
-    """Persistent Accept/Decline card. Counter omitted until 4b."""
+class CounterModal(discord.ui.Modal, title="Counter challenge"):
+    """Counter modal: optional matchup/context + swap-sides checkbox (Q1)."""
+
+    matchup = discord.ui.Label(
+        text="Matchup (optional)",
+        component=discord.ui.TextInput(
+            placeholder='A vs B — leave blank to keep',
+            required=False,
+            max_length=200,
+        ),
+    )
+    context = discord.ui.Label(
+        text="Context (optional)",
+        component=discord.ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            placeholder="Overwrite context only if non-empty",
+            required=False,
+            max_length=1000,
+        ),
+    )
+    swap = discord.ui.Label(
+        text="Swap sides",
+        description="Flip side_a↔side_b and advocate_a↔advocate_b",
+        component=discord.ui.Checkbox(default=False),
+    )
 
     def __init__(self, fight_id: int) -> None:
+        super().__init__()
+        self.fight_id = int(fight_id)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        matchup_val = (self.matchup.component.value or "").strip() or None  # type: ignore[union-attr]
+        context_val = (self.context.component.value or "").strip() or None  # type: ignore[union-attr]
+        swap_val = bool(self.swap.component.value)  # type: ignore[union-attr]
+        free = is_balance_free_counter_eligible(
+            get_db().get_fight(self.fight_id) or {}
+        )
+        try:
+            fight = counter_fight(
+                get_db(),
+                self.fight_id,
+                now=utc_now(),
+                actor_id=interaction.user.id,
+                matchup=matchup_val,
+                context=context_val,
+                swap_sides=swap_val,
+                count_against_limit=not free,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        if fight["status"] == "voided":
+            embed = challenge_card_embed(fight)
+            embed.color = discord.Color.dark_grey()
+            await interaction.response.edit_message(
+                content="Counters exhausted — fight **voided**.",
+                embed=embed,
+                view=None,
+            )
+            return
+
+        # Re-run balance when both sides known (store only; warning chrome = 4c).
+        if sides_complete(fight):
+            try:
+                apply_balance_to_fight(get_db(), int(fight["id"]))
+                fight = get_db().get_fight(int(fight["id"])) or fight
+            except Exception as e:
+                log.info("balance after counter skipped: %s", e)
+
+        view = ChallengeCardView(int(fight["id"]))
+        if interaction.client:
+            interaction.client.add_view(view)
+        holder = button_holder_id(fight)
+        note = (
+            f"Countered — buttons now with <@{holder}>."
+            if holder is not None
+            else "Countered."
+        )
+        await interaction.response.edit_message(
+            content=note,
+            embed=challenge_card_embed(fight),
+            view=view,
+        )
+
+
+class OpenEndedAcceptModal(discord.ui.Modal, title="Name your champion"):
+    """Open-ended Accept: challengee fills side_b (+ optional context)."""
+
+    champion = discord.ui.Label(
+        text="Your champion",
+        component=discord.ui.TextInput(
+            placeholder="Fighter name",
+            required=True,
+            max_length=100,
+        ),
+    )
+    context = discord.ui.Label(
+        text="Context (optional)",
+        component=discord.ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            placeholder="Optional constraints",
+            required=False,
+            max_length=1000,
+        ),
+    )
+
+    def __init__(self, fight_id: int) -> None:
+        super().__init__()
+        self.fight_id = int(fight_id)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        champion = (self.champion.component.value or "").strip()  # type: ignore[union-attr]
+        context_val = (self.context.component.value or "").strip() or None  # type: ignore[union-attr]
+        try:
+            fight = fill_open_ended_accept(
+                get_db(),
+                self.fight_id,
+                now=utc_now(),
+                actor_id=interaction.user.id,
+                champion=champion,
+                context=context_val,
+            )
+            # Balance only after both sides known (A1); no warning chrome in 4b.
+            try:
+                apply_balance_to_fight(get_db(), int(fight["id"]))
+            except Exception as e:
+                log.info("balance after open-ended accept skipped: %s", e)
+            thread_id = await _maybe_create_argument_thread(interaction, self.fight_id)
+            fight = accept_fight(
+                get_db(),
+                self.fight_id,
+                now=utc_now(),
+                actor_id=interaction.user.id,
+                thread_id=thread_id,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        await _respond_accepted(interaction, fight)
+
+
+class ChallengeCardView(discord.ui.View):
+    """Persistent Accept / Decline / Counter card (4a + 4b)."""
+
+    def __init__(self, fight_id: int, *, counter_label: str | None = None) -> None:
         super().__init__(timeout=None)
         self.fight_id = int(fight_id)
         accept = discord.ui.Button(
@@ -273,17 +422,48 @@ class ChallengeCardView(discord.ui.View):
             style=discord.ButtonStyle.secondary,
             custom_id=f"fightclub:decline:{self.fight_id}",
         )
+        label = counter_label or counter_button_label(
+            get_db().get_fight(self.fight_id)
+        )
+        counter = discord.ui.Button(
+            label=label,
+            style=discord.ButtonStyle.primary,
+            custom_id=f"fightclub:counter:{self.fight_id}",
+        )
         accept.callback = self.on_accept  # type: ignore[method-assign]
         decline.callback = self.on_decline  # type: ignore[method-assign]
+        counter.callback = self.on_counter  # type: ignore[method-assign]
         self.add_item(accept)
         self.add_item(decline)
+        self.add_item(counter)
 
     async def on_accept(self, interaction: discord.Interaction) -> None:
         expire_due_fights(get_db(), utc_now())
         fight_id = self.fight_id
+        fight = get_db().get_fight(fight_id)
+        if fight is None:
+            await interaction.response.send_message("Fight not found.", ephemeral=True)
+            return
+        # Open-ended with missing side_b → modal for champion (lead lock A1).
+        if fight.get("open_ended") and not sides_complete(fight):
+            holder = button_holder_id(fight)
+            if holder is not None and int(interaction.user.id) != int(holder):
+                await interaction.response.send_message(
+                    "Only the challenged user can Accept.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(OpenEndedAcceptModal(fight_id))
+            return
         try:
             # Thin thread stub (full receipts = item 5).
             thread_id = await _maybe_create_argument_thread(interaction, fight_id)
+            # Both sides known — optional balance store (warning UI = 4c).
+            if sides_complete(fight):
+                try:
+                    apply_balance_to_fight(get_db(), fight_id)
+                except Exception as e:
+                    log.info("balance before accept skipped: %s", e)
             fight = accept_fight(
                 get_db(),
                 fight_id,
@@ -294,17 +474,7 @@ class ChallengeCardView(discord.ui.View):
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
-        embed = challenge_card_embed(fight)
-        embed.color = discord.Color.green()
-        note = (
-            f"Accepted — status **{fight['status']}**"
-            + (
-                f" · thread `{fight.get('thread_id')}`"
-                if fight.get("thread_id")
-                else " · thread stub pending item 5"
-            )
-        )
-        await interaction.response.edit_message(content=note, embed=embed, view=None)
+        await _respond_accepted(interaction, fight)
 
     async def on_decline(self, interaction: discord.Interaction) -> None:
         expire_due_fights(get_db(), utc_now())
@@ -326,6 +496,49 @@ class ChallengeCardView(discord.ui.View):
             embed=embed,
             view=None,
         )
+
+    async def on_counter(self, interaction: discord.Interaction) -> None:
+        expire_due_fights(get_db(), utc_now())
+        fight = get_db().get_fight(self.fight_id)
+        if fight is None:
+            await interaction.response.send_message("Fight not found.", ephemeral=True)
+            return
+        holder = button_holder_id(fight)
+        if holder is not None and int(interaction.user.id) != int(holder):
+            await interaction.response.send_message(
+                "Only the button holder can Counter.",
+                ephemeral=True,
+            )
+            return
+        if fight["status"] != "proposed":
+            await interaction.response.send_message(
+                f"Cannot counter a fight in status={fight['status']!r}.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(CounterModal(self.fight_id))
+
+
+async def _respond_accepted(
+    interaction: discord.Interaction, fight: dict[str, Any]
+) -> None:
+    embed = challenge_card_embed(fight)
+    embed.color = discord.Color.green()
+    note = (
+        f"Accepted — status **{fight['status']}**"
+        + (
+            f" · thread `{fight.get('thread_id')}`"
+            if fight.get("thread_id")
+            else " · thread stub pending item 5"
+        )
+    )
+    # Modal submits may already have deferred; button path uses edit_message.
+    # Compare with ``is True`` so MagicMock in tests is not treated as done.
+    done = interaction.response.is_done()
+    if done is True:
+        await interaction.edit_original_response(content=note, embed=embed, view=None)
+    else:
+        await interaction.response.edit_message(content=note, embed=embed, view=None)
 
 
 async def _maybe_create_argument_thread(
@@ -454,7 +667,9 @@ class FightCog(commands.Cog):
             return
 
         if plan.kind == "proposed":
-            assert opponent is not None and plan.side_a and plan.side_b
+            assert opponent is not None and plan.side_a
+            if not plan.open_ended:
+                assert plan.side_b
             if opponent.id == interaction.user.id:
                 await interaction.response.send_message(
                     "You cannot challenge yourself.",
@@ -471,11 +686,24 @@ class FightCog(commands.Cog):
                 side_b=plan.side_b,
                 context=plan.context,
                 now=utc_now(),
+                open_ended=plan.open_ended,
             )
+            # Balance only when both sides known (skip open-ended until Accept).
+            if sides_complete(fight):
+                try:
+                    apply_balance_to_fight(get_db(), int(fight["id"]))
+                    fight = get_db().get_fight(int(fight["id"])) or fight
+                except Exception as e:
+                    log.info("balance at propose skipped: %s", e)
             view = ChallengeCardView(int(fight["id"]))
             self.bot.add_view(view)
+            content = (
+                f"{opponent.mention} — open-ended challenge (name your champion on Accept)."
+                if plan.open_ended
+                else f"{opponent.mention} — you've been challenged."
+            )
             await interaction.response.send_message(
-                content=f"{opponent.mention} — you've been challenged.",
+                content=content,
                 embed=challenge_card_embed(fight),
                 view=view,
             )

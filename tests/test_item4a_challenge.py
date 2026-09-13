@@ -50,9 +50,11 @@ def test_validate_fight_fields_ephemeral_prompt_when_missing() -> None:
     plan2 = validate_fight_fields(matchup="A vs B")  # no opponent, not instant
     assert plan2.kind == "prompt"
 
-    plan3 = validate_fight_fields(opponent_id=99, side="A")  # open-ended → 4b prompt
-    assert plan3.kind == "prompt"
-    assert "4b" in (plan3.prompt or "")
+    plan3 = validate_fight_fields(opponent_id=99, side="Aragorn")  # open-ended (4b)
+    assert plan3.kind == "proposed"
+    assert plan3.open_ended is True
+    assert plan3.side_a == "Aragorn"
+    assert plan3.side_b is None
 
 
 def test_validate_fight_fields_proposed_and_instant() -> None:
@@ -215,8 +217,7 @@ def test_challenge_card_embed_and_view_custom_ids(tmp_path: Path) -> None:
     custom_ids = {item.custom_id for item in view.children}
     assert f"fightclub:accept:{fight['id']}" in custom_ids
     assert f"fightclub:decline:{fight['id']}" in custom_ids
-    # Counter omitted in 4a
-    assert not any(cid and "counter" in cid for cid in custom_ids)
+    assert f"fightclub:counter:{fight['id']}" in custom_ids
     db.close()
 
 

@@ -91,8 +91,30 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     matchup) prompts toward 4b.
 
 23. **Accept** sets `accepted_at` and status `arguing` (accepted→arguing hop).
-    Thin `create_thread` stub only; receipts-at-accept is item 5. Counter button
-    omitted until 4b. Balance warning / free counter is 4c.
+    Thin `create_thread` stub only; receipts-at-accept is item 5. Counter +
+    open-ended landed in 4b. Balance warning / free counter is 4c.
 
-24. **Out of scope this commit** — 4b Counter+modals+open-ended accept; 4c
-    balance warning+free counter; item 5 thread+receipts; lead locks A1.
+24. **Out of scope in 4a** — completed by 4b/pending 4c/5 as noted below.
+
+## V2 item 4b (Counter + open-ended accept) — Sept 13 2026
+
+25. **Counter matrix (Q1)** — Always flips button holder (`challenger_id` ↔
+    `challengee_id`). Optional swap flips `side_a`↔`side_b` **and**
+    `advocate_a`↔`advocate_b`. Matchup/context overwrite only when non-empty.
+    Increments the countering advocate's pre-swap side counter; resets
+    `expires_at`; stays `proposed`. At `counters_per_side` (default 2) →
+    `voided`.
+
+26. **Open-ended** — `/fight opponent + side` without matchup posts an
+    open-ended card (`side_b` empty). Accept opens a modal for the challengee's
+    champion (+ optional context). Balance is deferred until both sides are
+    known (A1); `apply_balance_to_fight` stores scores/franchises but does **not**
+    post warning chrome (4c).
+
+27. **4c hooks** — `counter_button_label`, `is_balance_free_counter_eligible`,
+    `balance_warning_field`, and `count_against_limit=` on `counter_fight` are
+    stubs for free-counter labeling / quota skip. No free-counter exception yet.
+
+28. **Out of scope this commit** — 4c balance warning UI + free counter;
+    item 5 full thread receipts; `/config` wiring for counters (env/guild_config
+    helpers only).

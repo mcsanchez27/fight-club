@@ -106,18 +106,42 @@ def verdict_embed(v: dict[str, Any]) -> discord.Embed:
     return embed
 
 
+def balance_warning_field(fight: dict[str, Any]) -> tuple[str, str] | None:
+    """4c hook: return (name, value) for a balance warning field, or None.
+
+    4b stores balance scores on the fight after both sides are known but does
+    not render warning chrome yet.
+    """
+    _ = fight
+    return None
+
+
 def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
-    """Challenge card for a ``proposed`` fight (Accept / Decline)."""
+    """Challenge card for a ``proposed`` fight (Accept / Decline / Counter)."""
     side_a = str(fight.get("side_a") or "?")
     side_b = str(fight.get("side_b") or "?")
-    title = f"⚔ Challenge: {side_a} vs {side_b}"
+    open_ended = bool(fight.get("open_ended")) and not (
+        fight.get("side_b") and str(fight.get("side_b")).strip()
+    )
+    if open_ended:
+        title = f"⚔ Open challenge: {side_a} vs ?"
+        description = (
+            "Open-ended — Accept and name your champion. Decline to void. Counter to rewrite."
+        )
+    else:
+        title = f"⚔ Challenge: {side_a} vs {side_b}"
+        description = "Accept to open arguments. Decline to void. Counter to rewrite terms."
     embed = discord.Embed(
         title=_clip(title, 250),
-        description="Accept to open arguments. Decline to void. Counter arrives in 4b.",
+        description=description,
         color=discord.Color.dark_gold(),
     )
     embed.add_field(name="Side A", value=_clip(side_a, 256), inline=True)
-    embed.add_field(name="Side B", value=_clip(side_b, 256), inline=True)
+    embed.add_field(
+        name="Side B",
+        value=_clip(side_b if side_b != "?" else "(open — name on Accept)", 256),
+        inline=True,
+    )
     embed.add_field(name="​", value="​", inline=True)
     challenger = fight.get("challenger_id")
     challengee = fight.get("challengee_id")
@@ -125,9 +149,28 @@ def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
         embed.add_field(name="Challenger", value=f"<@{int(challenger)}>", inline=True)
     if challengee is not None:
         embed.add_field(name="Challenged", value=f"<@{int(challengee)}>", inline=True)
+    holder = challengee
+    if holder is not None:
+        embed.add_field(
+            name="Buttons",
+            value=f"<@{int(holder)}> holds Accept / Decline / Counter",
+            inline=False,
+        )
     ctx = fight.get("context")
     if ctx:
         embed.add_field(name="Context", value=_clip(str(ctx)), inline=False)
+    ca = int(fight.get("counters_a") or 0)
+    cb = int(fight.get("counters_b") or 0)
+    if ca or cb:
+        embed.add_field(
+            name="Counters",
+            value=f"A:{ca} · B:{cb}",
+            inline=True,
+        )
+    # 4c may add balance warning chrome via balance_warning_field.
+    warn = balance_warning_field(fight)
+    if warn is not None:
+        embed.add_field(name=warn[0], value=_clip(warn[1]), inline=False)
     expires = fight.get("expires_at")
     if expires:
         embed.add_field(name="Expires", value=_clip(str(expires), 256), inline=False)
@@ -135,6 +178,8 @@ def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
     footer = "Fight Club · challenge card"
     if fid is not None:
         footer += f" · fight #{int(fid)}"
+    if open_ended:
+        footer += " · open-ended"
     embed.set_footer(text=footer)
     return embed
 

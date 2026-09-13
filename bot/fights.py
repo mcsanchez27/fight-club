@@ -1,4 +1,4 @@
-"""V2 fight helpers — deadlines, validation, Accept/Decline transitions (item 4a).
+"""V2 fight helpers — deadlines, Accept/Decline/Counter, open-ended (items 4a/4b).
 
 Pure functions take an explicit ``now`` so tests can freeze the clock.
 Do not rely on ``tasks.loop`` for correctness (amendment / C3).
@@ -10,11 +10,12 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from bot.db import CourtDB
 
 DEFAULT_CHALLENGE_TIMEOUT_HOURS = 6.0
+DEFAULT_COUNTERS_PER_SIDE = 2
 _MATCHUP_SPLIT = re.compile(r"\s+vs\.?\s+", re.IGNORECASE)
 
 FightKind = Literal["proposed", "instant", "prompt"]
@@ -110,16 +111,85 @@ def challenge_timeout_hours(db: CourtDB, guild_id: int | None) -> float:
     return DEFAULT_CHALLENGE_TIMEOUT_HOURS
 
 
+def counters_per_side(db: CourtDB, guild_id: int | None) -> int:
+    """guild_config override, else env, else 2 (§7)."""
+    if guild_id is not None:
+        raw = db.get_guild_config(guild_id, "counters_per_side")
+        if raw is not None and str(raw).strip():
+            try:
+                return max(0, int(raw))
+            except ValueError:
+                pass
+    env = os.getenv("FIGHT_COUNTERS_PER_SIDE")
+    if env is not None and str(env).strip():
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    return DEFAULT_COUNTERS_PER_SIDE
+
+
 def compute_expires_at(now: datetime | str, hours: float) -> str:
     dt = as_datetime(now)
     return to_iso(dt + timedelta(hours=float(hours)))
 
 
+def button_holder_id(fight: dict[str, Any]) -> int | None:
+    """Who must Accept / Decline / Counter next (always the challengee)."""
+    cid = fight.get("challengee_id")
+    return int(cid) if cid is not None else None
+
+
+def actor_advocate_side(fight: dict[str, Any], actor_id: int) -> Literal["a", "b"] | None:
+    """Return ``'a'`` / ``'b'`` if actor is an advocate, else None."""
+    aa = fight.get("advocate_a_id")
+    ab = fight.get("advocate_b_id")
+    if aa is not None and int(actor_id) == int(aa):
+        return "a"
+    if ab is not None and int(actor_id) == int(ab):
+        return "b"
+    return None
+
+
+def sides_complete(fight: dict[str, Any]) -> bool:
+    """True when both champion labels are non-empty (needed before balance)."""
+    a = fight.get("side_a")
+    b = fight.get("side_b")
+    return bool(a and str(a).strip()) and bool(b and str(b).strip())
+
+
+def counter_button_label(fight: dict[str, Any] | None = None) -> str:
+    """Label for the Counter button.
+
+    4c may switch to ``\"Counter (free)\"`` when ``balance_warned`` and
+    ``balance_free_counter`` apply; 4b always returns plain ``Counter``.
+    """
+    # Hook for 4c — inspect fight balance flags without changing 4b UX.
+    _ = fight  # reserved for balance_warned / free-counter labeling
+    return "Counter"
+
+
+def is_balance_free_counter_eligible(fight: dict[str, Any]) -> bool:
+    """4c hook: True when a counter should not consume the per-side quota.
+
+    4b never treats a counter as free; 4c will gate on ``balance_warned`` and
+    guild ``balance_free_counter``.
+    """
+    _ = fight
+    return False
+
+
 MISSING_FIGHT_PROMPT = (
     "Need more to start a fight. Provide `opponent:@user` and "
-    '`matchup:"A vs B"` for a challenge card, or set `instant:true` with a '
-    "matchup (or `fighter_a` + `fighter_b`) for a solo ruling. "
+    '`matchup:"A vs B"` for a challenge card, or `opponent` + `side:"Champion"` '
+    "for an open-ended challenge, or set `instant:true` with a matchup "
+    "(or `fighter_a` + `fighter_b`) for a solo ruling. "
     "No menus — fill the slash fields and run `/fight` again."
+)
+
+OPEN_ENDED_SIDE_PROMPT = (
+    "Open-ended challenges need `opponent:@user` and your champion in "
+    '`side:"Name"`. The challengee names their champion on Accept.'
 )
 
 
@@ -148,11 +218,12 @@ def validate_fight_fields(
     """Classify `/fight` into proposed-card, instant bridge, or ephemeral prompt.
 
     Amendment 12 / §0: missing fields → text prompt only (no menus).
-    Open-ended (side without matchup) is deferred to 4b — prompt for now.
+    Open-ended (side without matchup) → proposed card with ``open_ended`` (4b).
     """
     ctx = context.strip() if context and context.strip() else None
     fa = fighter_a.strip() if fighter_a and fighter_a.strip() else None
     fb = fighter_b.strip() if fighter_b and fighter_b.strip() else None
+    side_tok = side.strip() if side and side.strip() else None
     parsed = parse_matchup(matchup)
 
     # V1-compatible instant: explicit instant flag, or legacy fighter_a/b alone.
@@ -170,10 +241,10 @@ def validate_fight_fields(
             )
         return FightCommandPlan(kind="prompt", prompt=MISSING_FIGHT_PROMPT)
 
-    # Proposed challenge card (4a): opponent + parseable matchup.
+    # Proposed challenge card: opponent + parseable matchup.
     if opponent_id is not None and parsed is not None:
         try:
-            side_a, side_b = resolve_sides(matchup or "", side)
+            side_a, side_b = resolve_sides(matchup or "", side_tok)
         except ValueError:
             return FightCommandPlan(kind="prompt", prompt=MISSING_FIGHT_PROMPT)
         return FightCommandPlan(
@@ -184,15 +255,19 @@ def validate_fight_fields(
             open_ended=False,
         )
 
-    # 4b territory: open-ended (side without full matchup) — prompt for 4a.
-    if opponent_id is not None and side and not parsed:
+    # Open-ended (4b / lead lock A1): opponent + side, no full matchup.
+    if opponent_id is not None and side_tok and not parsed:
         return FightCommandPlan(
-            kind="prompt",
-            prompt=(
-                "Open-ended challenges (side without matchup) land in item 4b. "
-                'For now provide matchup:"A vs B" with opponent:@user.'
-            ),
+            kind="proposed",
+            side_a=side_tok,
+            side_b=None,
+            context=ctx,
+            open_ended=True,
         )
+
+    # Opponent but neither matchup nor side.
+    if opponent_id is not None and not side_tok and not parsed:
+        return FightCommandPlan(kind="prompt", prompt=OPEN_ENDED_SIDE_PROMPT)
 
     return FightCommandPlan(kind="prompt", prompt=MISSING_FIGHT_PROMPT)
 
@@ -232,8 +307,9 @@ def accept_fight(
 ) -> dict[str, Any]:
     """``proposed`` → ``accepted`` → ``arguing``; record ``accepted_at``.
 
-    Only the challengee may accept. Raises ``ValueError`` on illegal transition.
-    Thread creation is optional (item 5); pass ``thread_id`` when available.
+    Only the button holder (challengee) may accept. Open-ended fights must have
+    both sides filled before accept (modal path). Raises ``ValueError`` on
+    illegal transition. Thread creation is optional (item 5).
     """
     expire_due_fights(db, now)
     fight = db.get_fight(fight_id)
@@ -243,22 +319,23 @@ def accept_fight(
         raise ValueError("This challenge has expired.")
     if fight["status"] != "proposed":
         raise ValueError(f"Cannot accept a fight in status={fight['status']!r}.")
-    challengee = fight.get("challengee_id")
-    if challengee is not None and int(actor_id) != int(challengee):
+    holder = button_holder_id(fight)
+    if holder is not None and int(actor_id) != int(holder):
         raise ValueError("Only the challenged user can Accept.")
+    if not sides_complete(fight):
+        raise ValueError(
+            "Open-ended challenge: name your champion in the Accept modal first."
+        )
 
     accepted_at = to_iso(as_datetime(now))
     fields: dict[str, Any] = {
         "status": "arguing",
         "accepted_at": accepted_at,
+        "open_ended": bool(fight.get("open_ended")),
     }
     if thread_id is not None:
         fields["thread_id"] = thread_id
-    # Brief accepted stamp then arguing is OK per 4a; we set arguing directly
-    # after writing accepted_at (single update keeps one source of truth).
     db.update_fight(fight_id, **fields)
-    # Ensure callers/tests can observe accepted→arguing intent: status is arguing
-    # with accepted_at set (accepted is a transient hop).
     out = db.get_fight(fight_id)
     assert out is not None
     return out
@@ -271,7 +348,7 @@ def decline_fight(
     now: datetime | str,
     actor_id: int,
 ) -> dict[str, Any]:
-    """``proposed`` → ``voided``. Only the challengee may decline."""
+    """``proposed`` → ``voided``. Only the button holder (challengee) may decline."""
     expire_due_fights(db, now)
     fight = db.get_fight(fight_id)
     if fight is None:
@@ -280,10 +357,190 @@ def decline_fight(
         raise ValueError("This challenge has expired.")
     if fight["status"] != "proposed":
         raise ValueError(f"Cannot decline a fight in status={fight['status']!r}.")
-    challengee = fight.get("challengee_id")
-    if challengee is not None and int(actor_id) != int(challengee):
+    holder = button_holder_id(fight)
+    if holder is not None and int(actor_id) != int(holder):
         raise ValueError("Only the challenged user can Decline.")
     db.update_fight(fight_id, status="voided")
+    out = db.get_fight(fight_id)
+    assert out is not None
+    return out
+
+
+def fill_open_ended_accept(
+    db: CourtDB,
+    fight_id: int,
+    *,
+    now: datetime | str,
+    actor_id: int,
+    champion: str,
+    context: str | None = None,
+) -> dict[str, Any]:
+    """Fill the missing challengee champion on an open-ended proposed fight.
+
+    Sets ``side_b`` (and optional context overwrite). Does **not** accept —
+    caller runs balance (when both sides known) then ``accept_fight``.
+    """
+    expire_due_fights(db, now)
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        raise ValueError("Fight not found.")
+    if fight["status"] == "expired":
+        raise ValueError("This challenge has expired.")
+    if fight["status"] != "proposed":
+        raise ValueError(f"Cannot fill sides in status={fight['status']!r}.")
+    if not fight.get("open_ended"):
+        raise ValueError("This challenge is not open-ended.")
+    holder = button_holder_id(fight)
+    if holder is not None and int(actor_id) != int(holder):
+        raise ValueError("Only the challenged user can Accept.")
+    name = champion.strip() if champion else ""
+    if not name:
+        raise ValueError("Name your champion to Accept.")
+    fields: dict[str, Any] = {"side_b": name}
+    if context is not None and str(context).strip():
+        fields["context"] = str(context).strip()
+    db.update_fight(fight_id, **fields)
+    out = db.get_fight(fight_id)
+    assert out is not None
+    return out
+
+
+def apply_balance_to_fight(
+    db: CourtDB,
+    fight_id: int,
+    *,
+    balance_fn: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Run balance when both sides are known; store scores without warning UI.
+
+    Deferred until sides complete (lead lock A1). 4c will set ``balance_warned``
+    and free-counter labeling from the stored fields; 4b does not post chrome.
+    """
+    fight = db.get_fight(fight_id)
+    if fight is None or not sides_complete(fight):
+        return None
+    if balance_fn is None:
+        from bot.judge import balance_read
+
+        balance_fn = balance_read
+    result = balance_fn(
+        str(fight["side_a"]),
+        str(fight["side_b"]),
+        fight.get("context"),
+    )
+    favored = result.get("favored_side")
+    fields: dict[str, Any] = {
+        "balance_score": float(result["score"]),
+        "balance_favored": None if favored in (None, "even") else str(favored),
+        "balance_reason": str(result.get("reason") or "") or None,
+        "franchise_a": result.get("franchise_a"),
+        "franchise_b": result.get("franchise_b"),
+        # balance_warned left False for 4c to flip based on threshold.
+    }
+    db.update_fight(fight_id, **fields)
+    return result
+
+
+def counter_fight(
+    db: CourtDB,
+    fight_id: int,
+    *,
+    now: datetime | str,
+    actor_id: int,
+    matchup: str | None = None,
+    context: str | None = None,
+    swap_sides: bool = False,
+    count_against_limit: bool | None = None,
+) -> dict[str, Any]:
+    """Apply Counter (amendment 6 / Q1). Stays ``proposed`` unless voided.
+
+    Matrix:
+    - Always flips button holder (``challenger_id`` ↔ ``challengee_id``).
+    - Optional ``swap_sides``: ``side_a``↔``side_b`` and ``advocate_a``↔``advocate_b``.
+    - Matchup / context overwrite **only if non-empty**.
+    - Increments the countering advocate's side counter (pre-swap).
+    - Resets ``expires_at``.
+    - At ``counters_per_side`` → ``voided`` (unless ``count_against_limit=False``;
+      4c free-counter hook).
+    """
+    expire_due_fights(db, now)
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        raise ValueError("Fight not found.")
+    if fight["status"] == "expired":
+        raise ValueError("This challenge has expired.")
+    if fight["status"] != "proposed":
+        raise ValueError(f"Cannot counter a fight in status={fight['status']!r}.")
+    holder = button_holder_id(fight)
+    if holder is None or int(actor_id) != int(holder):
+        raise ValueError("Only the button holder can Counter.")
+
+    side = actor_advocate_side(fight, actor_id)
+    if side is None:
+        raise ValueError("Only an advocate can Counter.")
+
+    guild_id = fight.get("guild_id")
+    limit = counters_per_side(db, int(guild_id) if guild_id is not None else None)
+    ca = int(fight.get("counters_a") or 0)
+    cb = int(fight.get("counters_b") or 0)
+    used = ca if side == "a" else cb
+
+    # 4c hook: free counter after balance warning skips the quota.
+    against = (
+        True
+        if count_against_limit is None
+        else bool(count_against_limit)
+    )
+    if against is False:
+        pass
+    elif used >= limit:
+        db.update_fight(fight_id, status="voided")
+        out = db.get_fight(fight_id)
+        assert out is not None
+        return out
+
+    fields: dict[str, Any] = {}
+    if against:
+        if side == "a":
+            fields["counters_a"] = ca + 1
+        else:
+            fields["counters_b"] = cb + 1
+
+    # Always flip button holder.
+    challenger = fight.get("challenger_id")
+    challengee = fight.get("challengee_id")
+    fields["challenger_id"] = challengee
+    fields["challengee_id"] = challenger
+
+    # Matchup / context overwrite only when non-empty (before optional swap).
+    parsed = parse_matchup(matchup)
+    if parsed is not None:
+        fields["side_a"] = parsed[0]
+        fields["side_b"] = parsed[1]
+        # Filling both sides clears open-ended.
+        fields["open_ended"] = False
+    if context is not None and str(context).strip():
+        fields["context"] = str(context).strip()
+
+    # Resolve current side/advocate values after matchup overwrite.
+    side_a = fields.get("side_a", fight.get("side_a"))
+    side_b = fields.get("side_b", fight.get("side_b"))
+    adv_a = fight.get("advocate_a_id")
+    adv_b = fight.get("advocate_b_id")
+
+    if swap_sides:
+        fields["side_a"] = side_b
+        fields["side_b"] = side_a
+        fields["advocate_a_id"] = adv_b
+        fields["advocate_b_id"] = adv_a
+
+    hours = challenge_timeout_hours(
+        db, int(guild_id) if guild_id is not None else None
+    )
+    fields["expires_at"] = compute_expires_at(now, hours)
+    fields["status"] = "proposed"
+
+    db.update_fight(fight_id, **fields)
     out = db.get_fight(fight_id)
     assert out is not None
     return out
@@ -296,10 +553,11 @@ def create_proposed_fight(
     channel_id: int | None,
     challenger_id: int,
     challengee_id: int,
-    side_a: str,
-    side_b: str,
+    side_a: str | None,
+    side_b: str | None,
     context: str | None,
     now: datetime | str,
+    open_ended: bool = False,
 ) -> dict[str, Any]:
     """Insert a ``proposed`` fight with ``expires_at`` from challenge timeout."""
     hours = challenge_timeout_hours(db, guild_id)
@@ -309,7 +567,7 @@ def create_proposed_fight(
         channel_id=channel_id,
         status="proposed",
         instant=False,
-        open_ended=False,
+        open_ended=open_ended,
         challenger_id=challenger_id,
         challengee_id=challengee_id,
         advocate_a_id=challenger_id,

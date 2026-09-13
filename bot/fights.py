@@ -1003,3 +1003,43 @@ def cancel_fight(
     out = db.get_fight(fight_id)
     assert out is not None
     return out
+
+
+# --- Item 12: instant path on fight rows --------------------------------------
+
+
+def create_instant_fight(
+    db: CourtDB,
+    *,
+    guild_id: int | None,
+    channel_id: int | None,
+    user_id: int,
+    side_a: str,
+    side_b: str,
+    context: str | None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Insert an ``instant=1`` fight in ``proposed`` (no thread, no opponent).
+
+    Caller judges then calls ``finalize_instant_ruling`` so status moves
+    ``proposed`` → ``ruled`` in one step (V1 vending-machine UX / §1, §8).
+    """
+    _ = now  # reserved for symmetry with create_proposed_fight; no expires_at
+    fight_id = db.create_fight(
+        guild_id=guild_id,
+        channel_id=channel_id,
+        thread_id=None,
+        status="proposed",
+        instant=True,
+        open_ended=False,
+        challenger_id=int(user_id),
+        challengee_id=None,
+        advocate_a_id=int(user_id),
+        advocate_b_id=None,
+        side_a=side_a,
+        side_b=side_b,
+        context=context,
+    )
+    fight = db.get_fight(fight_id)
+    assert fight is not None
+    return fight

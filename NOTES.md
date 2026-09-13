@@ -303,3 +303,21 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 
 65. **Out of scope** — instant refactor (12), README beyond `.env.example`
     `FIGHT_ALLOWED_CHANNELS` note (13).
+
+## V2 item 12 (instant on fight rows) — Sept 13 2026
+
+66. **`instant:true` → fight row** — `create_instant_fight` inserts
+    `instant=1`, `status=proposed`, `thread_id=NULL`. After judge,
+    `finalize_instant_ruling` inserts `kind='instant'` with `fight_id` and
+    moves `proposed` → `ruled` (no thread). V1 helpers kept; path refactored
+    onto rows (§8).
+
+67. **Challenge button** — Attached only on instant drops. Handler uses
+    `challenge_allowed_for_ruling`: allow `kind='instant'` / `fight.instant` /
+    legacy V1 (no fight_id); reject thread `initial`/`reconsideration` with
+    pointer to `/reconsider`. Challenge revisions on instant fights also stamp
+    `kind='instant'` + `fight_id`.
+
+68. **Records** — Instant still excluded (flag + `kind` not in
+    initial/reconsideration). CLI `python -m bot.cli` unchanged (solo judge,
+    no Discord). README rewrite deferred to item 13.

@@ -47,6 +47,7 @@ from bot.fights import (
     cancel_fight,
     counter_button_label,
     counter_fight,
+    create_instant_fight,
     create_proposed_fight,
     decline_fight,
     expire_due_fights,
@@ -63,7 +64,10 @@ from bot.fights import (
     validate_fight_fields,
 )
 from bot.ruling import (
+    CHALLENGE_ONLY_INSTANT_MSG,
+    challenge_allowed_for_ruling,
     display_name,
+    finalize_instant_ruling,
     format_winner_one_liner,
     jump_url,
     reconsider_fight,
@@ -92,6 +96,8 @@ def store_ruling(
     fighter_b: str,
     context: str | None = None,
     ruling_id: int | None = None,
+    fight_id: int | None = None,
+    kind: str | None = None,
 ) -> None:
     _last_verdict[message_id] = {
         "verdict": verdict,
@@ -99,6 +105,8 @@ def store_ruling(
         "fighter_b": fighter_b,
         "context": context,
         "ruling_id": ruling_id,
+        "fight_id": fight_id,
+        "kind": kind,
     }
 
 
@@ -115,6 +123,8 @@ def get_ruling(message_id: int) -> dict[str, Any] | None:
         "fighter_b": row["fighter_b"],
         "context": row["context"],
         "ruling_id": row["id"],
+        "fight_id": row.get("fight_id"),
+        "kind": row.get("kind"),
     }
     _last_verdict[message_id] = state
     return state
@@ -153,6 +163,8 @@ def _persist_ruling(
     context: str | None,
     verdict: dict[str, Any],
     parent_ruling_id: int | None = None,
+    fight_id: int | None = None,
+    kind: str | None = None,
 ) -> int:
     voided = bool(verdict.get("voided"))
     retrieval_status = verdict.get("retrieval_status")
@@ -169,6 +181,8 @@ def _persist_ruling(
         franchise=franchise if isinstance(franchise, str) else None,
         retrieval_status=retrieval_status if isinstance(retrieval_status, str) else None,
         voided=voided,
+        fight_id=fight_id,
+        kind=kind,
     )
     _persist_citations(ruling_id, verdict)
     # Only auto-retry hard fetch failures. Unlisted/disabled never become
@@ -180,7 +194,7 @@ def _persist_ruling(
         )
     store_ruling(
         message_id, verdict, fighter_a=fighter_a, fighter_b=fighter_b,
-        context=context, ruling_id=ruling_id,
+        context=context, ruling_id=ruling_id, fight_id=fight_id, kind=kind,
     )
     u = usage_from_verdict(verdict)
     tin = u["tokens_in"]
@@ -216,13 +230,23 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
         max_length=1500,
     )
 
-    def __init__(self, prior: dict[str, Any], *, fighter_a: str, fighter_b: str, context: str | None, parent_ruling_id: int | None):
+    def __init__(
+        self,
+        prior: dict[str, Any],
+        *,
+        fighter_a: str,
+        fighter_b: str,
+        context: str | None,
+        parent_ruling_id: int | None,
+        fight_id: int | None = None,
+    ):
         super().__init__()
         self.prior = prior
         self.fighter_a = fighter_a
         self.fighter_b = fighter_b
         self.context = context
         self.parent_ruling_id = parent_ruling_id
+        self.fight_id = fight_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         reject = _preflight(interaction)
@@ -254,16 +278,45 @@ class ChallengeModal(discord.ui.Modal, title="Challenge the ruling"):
             await interaction.followup.send(f"Re-judge failed: {e}", ephemeral=True)
             return
         limiter.record(interaction.user.id, interaction.guild_id)
+        # Challenge button is instant-only; keep ChallengeView on the revision.
         msg = await interaction.followup.send(
             content="⚖ Court revises on challenge:",
             embed=verdict_embed(verdict),
             view=ChallengeView(),
         )
-        _persist_ruling(
-            message_id=msg.id, channel_id=interaction.channel_id, guild_id=interaction.guild_id,
-            fighter_a=self.fighter_a, fighter_b=self.fighter_b, context=self.context,
-            verdict=verdict, parent_ruling_id=self.parent_ruling_id,
-        )
+        if self.fight_id is not None:
+            out = finalize_instant_ruling(
+                get_db(),
+                int(self.fight_id),
+                verdict,
+                message_id=int(msg.id),
+                channel_id=interaction.channel_id,
+                guild_id=interaction.guild_id,
+                now=utc_now(),
+                parent_ruling_id=self.parent_ruling_id,
+            )
+            store_ruling(
+                int(msg.id),
+                out["verdict"],
+                fighter_a=self.fighter_a,
+                fighter_b=self.fighter_b,
+                context=self.context,
+                ruling_id=int(out["ruling_id"]),
+                fight_id=int(self.fight_id),
+                kind="instant",
+            )
+        else:
+            # Legacy V1 challenge (no fight row).
+            _persist_ruling(
+                message_id=msg.id,
+                channel_id=interaction.channel_id,
+                guild_id=interaction.guild_id,
+                fighter_a=self.fighter_a,
+                fighter_b=self.fighter_b,
+                context=self.context,
+                verdict=verdict,
+                parent_ruling_id=self.parent_ruling_id,
+            )
 
 
 class ChallengeView(discord.ui.View):
@@ -274,16 +327,25 @@ class ChallengeView(discord.ui.View):
     async def challenge(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         message = interaction.message
         state = get_ruling(message.id) if message is not None else None
-        if not state:
+        fight = None
+        if state and state.get("fight_id") is not None:
+            fight = get_db().get_fight(int(state["fight_id"]))
+        ok, err = challenge_allowed_for_ruling(state, fight=fight)
+        if not ok:
             await interaction.response.send_message(
-                "No ruling attached to this message to challenge. Run `/fight` first.",
+                err or CHALLENGE_ONLY_INSTANT_MSG,
                 ephemeral=True,
             )
             return
+        assert state is not None
         await interaction.response.send_modal(
             ChallengeModal(
-                state["verdict"], fighter_a=state["fighter_a"], fighter_b=state["fighter_b"],
-                context=state.get("context"), parent_ruling_id=state.get("ruling_id"),
+                state["verdict"],
+                fighter_a=state["fighter_a"],
+                fighter_b=state["fighter_b"],
+                context=state.get("context"),
+                parent_ruling_id=state.get("ruling_id"),
+                fight_id=state.get("fight_id"),
             )
         )
 
@@ -987,7 +1049,7 @@ class FightCog(commands.Cog):
                 try:
                     msg = await channel.send(
                         content=f"⚖ Automatic re-judge for voided ruling #{item['ruling_id']} (retrieval restored):",
-                        embed=verdict_embed(verdict), view=ChallengeView(),
+                        embed=verdict_embed(verdict),
                     )
                     message_id = msg.id
                 except Exception as e:
@@ -1006,9 +1068,9 @@ class FightCog(commands.Cog):
         matchup='Matchup label, e.g. "Aragorn vs Goku"',
         context="Optional arena, rules, or constraints",
         side="Your side: A, B, or a fighter name from the matchup",
-        instant="If true, skip the card and rule immediately (V1 bridge)",
-        fighter_a="V1/instant: first fighter (optional bridge until item 12)",
-        fighter_b="V1/instant: second fighter (optional bridge until item 12)",
+        instant="If true, skip the card and rule immediately (no thread)",
+        fighter_a="Instant: first fighter (or use matchup)",
+        fighter_b="Instant: second fighter (or use matchup)",
         franchise="Optional franchise key/label (instant path)",
         exhibits="Optional user-pasted evidence (instant path)",
     )
@@ -1095,7 +1157,7 @@ class FightCog(commands.Cog):
             get_db().update_fight(int(fight["id"]), card_message_id=int(sent.id))
             return
 
-        # Instant bridge (item 12 will park this on fight rows).
+        # Instant path (§8 / item 12): fight row instant=1, proposed→ruled, no thread.
         assert plan.side_a and plan.side_b
         fa, fb = plan.side_a, plan.side_b
         reject = _preflight(interaction)
@@ -1125,11 +1187,38 @@ class FightCog(commands.Cog):
             await interaction.followup.send(f"Judgment failed: {e}", ephemeral=True)
             return
         limiter.record(interaction.user.id, interaction.guild_id)
-        msg = await interaction.followup.send(embed=verdict_embed(verdict), view=ChallengeView())
-        _persist_ruling(
-            message_id=msg.id, channel_id=interaction.channel_id, guild_id=interaction.guild_id,
-            fighter_a=fa, fighter_b=fb, context=plan.context, verdict=verdict,
-            parent_ruling_id=None,
+        fight = create_instant_fight(
+            get_db(),
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
+            user_id=interaction.user.id,
+            side_a=fa,
+            side_b=fb,
+            context=plan.context,
+            now=utc_now(),
+        )
+        msg = await interaction.followup.send(
+            embed=verdict_embed(verdict), view=ChallengeView()
+        )
+        out = finalize_instant_ruling(
+            get_db(),
+            int(fight["id"]),
+            verdict,
+            message_id=int(msg.id),
+            channel_id=interaction.channel_id,
+            guild_id=interaction.guild_id,
+            now=utc_now(),
+            franchise=franchise if isinstance(franchise, str) else None,
+        )
+        store_ruling(
+            int(msg.id),
+            out["verdict"],
+            fighter_a=fa,
+            fighter_b=fb,
+            context=plan.context,
+            ruling_id=int(out["ruling_id"]),
+            fight_id=int(fight["id"]),
+            kind="instant",
         )
 
     @app_commands.command(name="rest", description="Rest your case (advocates, fight thread only)")

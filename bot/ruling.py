@@ -823,3 +823,219 @@ def reconsider_fight(
         "evidence": evidence_s,
         "kind": "reconsideration",
     }
+
+
+# --- Item 12: instant rulings on fight rows ------------------------------------
+
+CHALLENGE_ONLY_INSTANT_MSG = (
+    "Challenge is only available on **instant** rulings. "
+    "For thread fights, use `/reconsider` with new evidence."
+)
+
+
+def resolve_instant_winner_side(
+    verdict: dict[str, Any],
+    side_a: str | None,
+    side_b: str | None,
+) -> str | None:
+    """Map verdict winner_side / free-text winner onto ``'a'|'b'`` when possible."""
+    ws = verdict.get("winner_side")
+    if isinstance(ws, str) and ws.strip().lower() in {"a", "b"}:
+        return ws.strip().lower()
+    w = verdict.get("winner")
+    if not isinstance(w, str) or not w.strip():
+        return None
+    wl = w.strip().lower()
+    if wl in {"a", "b"}:
+        return wl
+    if side_a and wl == str(side_a).strip().lower():
+        return "a"
+    if side_b and wl == str(side_b).strip().lower():
+        return "b"
+    return None
+
+
+def challenge_allowed_for_ruling(
+    ruling: dict[str, Any] | None,
+    *,
+    fight: dict[str, Any] | None = None,
+) -> tuple[bool, str | None]:
+    """Whether the V1 Challenge button may open for this ruling (§3 / §11.12).
+
+    Allowed: ``kind='instant'``, ``fight.instant``, or legacy V1 rows (no
+    ``fight_id`` / kind). Rejected: thread ``initial``/``reconsideration``
+    rulings — callers should point users at ``/reconsider``.
+    """
+    if not ruling:
+        return False, (
+            "No ruling attached to this message to challenge. Run `/fight` first."
+        )
+    kind_raw = ruling.get("kind")
+    kind = str(kind_raw).strip().lower() if kind_raw is not None else None
+    if kind == "":
+        kind = None
+    fight_id = ruling.get("fight_id")
+
+    if kind == "instant":
+        return True, None
+    if fight is not None and bool(fight.get("instant")):
+        return True, None
+    if kind in {"initial", "reconsideration"}:
+        return False, CHALLENGE_ONLY_INSTANT_MSG
+    if fight is not None and not bool(fight.get("instant")):
+        return False, CHALLENGE_ONLY_INSTANT_MSG
+    # Legacy V1 (pre-item-12): no fight linkage.
+    if fight_id is None and kind is None:
+        return True, None
+    return False, CHALLENGE_ONLY_INSTANT_MSG
+
+
+def finalize_instant_ruling(
+    db: CourtDB,
+    fight_id: int,
+    verdict: dict[str, Any],
+    *,
+    message_id: int | None,
+    channel_id: int | None = None,
+    guild_id: int | None = None,
+    now: datetime | str | None = None,
+    parent_ruling_id: int | None = None,
+    franchise: str | None = None,
+) -> dict[str, Any]:
+    """Stamp ``kind='instant'`` ruling and move fight ``proposed`` → ``ruled``.
+
+    No thread is created or archived (``thread_id`` stays null). Instant fights
+    are excluded from derived records (item 9).
+    """
+    from bot.fights import utc_now
+
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        raise ValueError("Fight not found.")
+    if not bool(fight.get("instant")):
+        raise ValueError("finalize_instant_ruling requires an instant fight.")
+
+    v = dict(verdict)
+    side_a = str(fight.get("side_a") or "")
+    side_b = str(fight.get("side_b") or "")
+    matchup = f"{side_a or '?'} vs {side_b or '?'}"
+    v.setdefault("matchup", matchup)
+
+    winner_side = resolve_instant_winner_side(v, side_a, side_b)
+    if winner_side in {"a", "b"}:
+        v["winner_side"] = winner_side
+        v.setdefault("winner", side_a if winner_side == "a" else side_b)
+
+    winner_adv = None
+    if winner_side == "a" and fight.get("advocate_a_id") is not None:
+        winner_adv = int(fight["advocate_a_id"])
+    elif winner_side == "b" and fight.get("advocate_b_id") is not None:
+        winner_adv = int(fight["advocate_b_id"])
+
+    now_dt = as_datetime(now) if now is not None else utc_now()
+    ruled_at = to_iso(now_dt)
+
+    ret_status = v.get("retrieval_status")
+    if not isinstance(ret_status, str):
+        ret_status = None
+    fran = franchise
+    if fran is None:
+        fran = v.get("franchise") if isinstance(v.get("franchise"), str) else None
+
+    usage = v.get("_usage") if isinstance(v.get("_usage"), dict) else {}
+    model = str(usage.get("model") or ruling_model())
+
+    ch = channel_id if channel_id is not None else fight.get("channel_id")
+    gid = guild_id if guild_id is not None else fight.get("guild_id")
+
+    ruling_id = db.insert_ruling(
+        message_id=message_id,
+        channel_id=ch,
+        guild_id=gid,
+        fighter_a=side_a,
+        fighter_b=side_b,
+        context=fight.get("context"),
+        verdict=v,
+        parent_ruling_id=parent_ruling_id,
+        franchise=fran,
+        retrieval_status=ret_status,
+        voided=bool(v.get("voided")),
+        fight_id=int(fight_id),
+        kind="instant",
+        judge_model=model,
+        winner_side=winner_side if winner_side in {"a", "b"} else None,
+        winner_advocate_id=winner_adv,
+        confidence=float(v["confidence"]) if v.get("confidence") is not None else None,
+        opening_score_a=v.get("opening_score_a"),
+        opening_score_b=v.get("opening_score_b"),
+        close_score_a=v.get("close_score_a"),
+        close_score_b=v.get("close_score_b"),
+        argument_quality=v.get("argument_quality"),
+        transcript_snapshot=None,
+    )
+
+    for c in v.get("citations") or []:
+        if isinstance(c, str):
+            db.insert_citation(
+                ruling_id=ruling_id,
+                claim=c,
+                source_url=None,
+                locator=None,
+                snippet=None,
+                verified=False,
+                retrieved_at=None,
+                kind="receipt",
+            )
+            continue
+        if not isinstance(c, dict):
+            continue
+        db.insert_citation(
+            ruling_id=ruling_id,
+            claim=str(c.get("claim") or ""),
+            source_url=str(c.get("source_url") or "") or None,
+            locator=str(c.get("locator") or "") or None,
+            snippet=str(c.get("snippet") or "") or None,
+            verified=bool(c.get("verified")),
+            retrieved_at=str(c.get("retrieved_at") or "") or None,
+            kind=str(c.get("kind") or "receipt"),
+        )
+
+    # proposed → ruled; never create a thread.
+    db.update_fight(
+        fight_id,
+        status=RULED_STATUS,
+        ruled_at=ruled_at,
+        thread_id=None,
+    )
+    fight = db.get_fight(fight_id) or fight
+
+    try:
+        from bot.budget import current_month, estimate_usd, usage_from_verdict
+
+        u = usage_from_verdict(v)
+        tin = u["tokens_in"]
+        tout = u["tokens_out"]
+        if tin <= 0 and tout <= 0:
+            tin = 5000 if ret_status == "ok" else 2500
+            tout = 1000
+        db.record_usage(
+            month=current_month(),
+            tokens_in=tin,
+            tokens_out=tout,
+            estimated_usd=estimate_usd(tin, tout),
+            retrieval_seconds=u["retrieval_seconds"],
+            judge_seconds=u["judge_seconds"],
+            total_seconds=u["total_seconds"],
+            fight_id=int(fight_id),
+            role="ruling",
+        )
+    except Exception:
+        pass
+
+    return {
+        "fight": fight,
+        "ruling_id": ruling_id,
+        "verdict": v,
+        "kind": "instant",
+        "parent_ruling_id": parent_ruling_id,
+    }

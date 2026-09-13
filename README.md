@@ -15,7 +15,7 @@ Lean stack: `discord.py`, Anthropic (preferred) or OpenAI-compatible chat comple
 
 `instant:true` on `/fight` keeps the **V1 path**: no card/thread — judge immediately (solo play and judge testing). Challenge button on those rulings only; thread fights use `/reconsider` instead.
 
-Standing rule: **never start the Discord bot unless Matt says "start the bot."** CLI + pytest are the test surface. Deadlines are pure functions over fight rows (also swept at slash/button entry); a live `tasks.loop` only runs when the bot is actually up.
+Standing rule: **never start the Discord bot unless Matt says "start the bot."** CLI + pytest are the test surface. Deadlines are pure functions over fight rows (swept at slash/button entry **and** on the background `tasks.loop` every `sweep_interval_minutes`, default 2); the live loop only runs when the bot is actually up.
 
 ## Setup
 
@@ -77,6 +77,7 @@ cp .env.example .env
 | `FIGHT_TRANSCRIPT_MAX_TOKENS` | no | judge-pack transcript cap (default `20000`) |
 | `FIGHT_THREAD_ARCHIVE_DELAY_HOURS` | no | archive delay after `ruled_at` (default `24`) |
 | `FIGHT_ALLOWED_CHANNELS` | no | comma-separated channel IDs; empty = all |
+| `FIGHT_SWEEP_INTERVAL_MINUTES` | no | background deadline sweep interval (default `2`) — §7 `sweep_interval_minutes` |
 
 Env vars are the **global default**. Per-server `guild_config` (via `/config`) overrides them. Hardcoded §7 defaults sit under both.
 
@@ -97,6 +98,7 @@ Writable with `/config` (`Manage Server`). Precedence: **env default &lt; guild 
 | `allowed_channels` | `[]` | Empty = all channels; else only listed IDs |
 | `thread_archive_delay_hours` | `24` | Archive fight thread after ruling |
 | `transcript_max_tokens` | `20000` | Middle-truncation cap for the judge pack |
+| `sweep_interval_minutes` | `2` | Background loop: deadline sweep (+ rejudge queue) |
 
 ## Run
 

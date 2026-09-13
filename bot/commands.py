@@ -21,6 +21,7 @@ from bot.config import (
     ConfigError,
     channel_allowed,
     format_config_value,
+    get_guild_config,
     list_config_lines,
     set_config,
 )
@@ -977,6 +978,10 @@ async def fetch_thread_message_dicts(channel: Any, *, limit: int = 500) -> list[
 class FightCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Background interval: §7 sweep_interval_minutes (default 2), env/global.
+        minutes = float(get_guild_config(None, None, "sweep_interval_minutes"))
+        if minutes > 0:
+            self.rejudge_loop.change_interval(minutes=minutes)
         self.rejudge_loop.start()
 
     def cog_unload(self) -> None:
@@ -1008,13 +1013,35 @@ class FightCog(commands.Cog):
         except Exception as e:
             log.warning("contest reaction failed: %s", e)
 
-    @tasks.loop(minutes=15)
+    @tasks.loop(minutes=2)
     async def rejudge_loop(self) -> None:
+        """Background tick: deadline sweep + V1 rejudge queue.
+
+        Interval from ``sweep_interval_minutes`` (default 2). Deadlines used to
+        run only on interaction entry; this loop wakes them on the interval.
+        """
+        await self._run_background_sweep()
         await self._process_rejudge_queue()
 
     @rejudge_loop.before_loop
     async def before_rejudge_loop(self) -> None:
         await self.bot.wait_until_ready()
+
+    async def _run_background_sweep(self) -> None:
+        """Call ``sweep_deadlines`` with archive callback while the bot is live."""
+        def _archive_cb(f: dict[str, Any]) -> None:
+            try:
+                asyncio.get_running_loop().create_task(
+                    _archive_fight_thread(f, self.bot)
+                )
+            except RuntimeError:
+                pass
+
+        # Re-apply interval so env/guild-global overrides take effect without restart.
+        minutes = float(get_guild_config(get_db(), None, "sweep_interval_minutes"))
+        if minutes > 0:
+            self.rejudge_loop.change_interval(minutes=minutes)
+        sweep_deadlines(get_db(), utc_now(), archive_thread=_archive_cb)
 
     async def _process_rejudge_queue(self) -> None:
         db = get_db()

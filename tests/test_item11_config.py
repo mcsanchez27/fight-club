@@ -54,6 +54,7 @@ def test_defaults_match_section_7(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert resolved["allowed_channels"] == []
     assert resolved["thread_archive_delay_hours"] == 24.0
     assert resolved["transcript_max_tokens"] == 20_000
+    assert resolved["sweep_interval_minutes"] == 2
     db.close()
 
 

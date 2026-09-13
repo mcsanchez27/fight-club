@@ -19,6 +19,13 @@ from bot.budget import (
 )
 from bot.db import get_db
 from bot.embeds import challenge_card_embed, ruling_drop_embed, verdict_embed
+from bot.records import (
+    flare_for_winner,
+    format_last5,
+    format_streak_label,
+    leaderboard as derive_leaderboard,
+    record_for_user,
+)
 from bot.export import export_markdown
 from bot.exhibits import contest_exhibits_on_message, prepare_judge_materials
 from bot.fights import (
@@ -773,11 +780,29 @@ async def drop_ruling_messages(
     """Post full embed in thread + channel one-liner; stamp ruling message_id."""
     fight = result["fight"]
     verdict = result["verdict"]
+    flare = result.get("flare_line")
+    if not flare:
+        winner_adv = None
+        ws = (verdict or {}).get("winner_side")
+        if ws in {"a", "b"}:
+            winner_adv = fight.get(f"advocate_{ws}_id")
+        if winner_adv is not None and fight.get("guild_id") is not None:
+            try:
+                flare = flare_for_winner(
+                    get_db(),
+                    guild_id=int(fight["guild_id"]),
+                    winner_advocate_id=int(winner_adv),
+                    winner_name=winner_display,
+                )
+            except Exception as e:
+                log.warning("flare compute failed: %s", e)
+                flare = None
     embed = ruling_drop_embed(
         verdict,
         fight=fight,
         thin_record=bool(result.get("thin_record")),
         exhibit_ledger=result.get("exhibit_ledger"),
+        flare_line=flare,
     )
     thread_msg = await thread.send(embed=embed)
     ruling_id = result.get("ruling_id")
@@ -1251,6 +1276,75 @@ class FightCog(commands.Cog):
             lines.append(f"{i}. **{matchup}** — {winner} ({conf}/10) · {revised}{void}")
         embed = discord.Embed(title="⚔ Court standings", description="\n".join(lines), color=discord.Color.dark_gold())
         embed.set_footer(text=f"Last {len(rows)} ruling(s) in this server")
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="leaderboard", description="Server Fight Club leaderboard (top 15)")
+    async def leaderboard_cmd(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Leaderboard is only available in a server.", ephemeral=True
+            )
+            return
+        rows = derive_leaderboard(get_db(), int(interaction.guild_id), limit=15)
+        if not rows:
+            await interaction.response.send_message(
+                "No countable records yet. Finish a fight or forfeit.",
+                ephemeral=True,
+            )
+            return
+        lines: list[str] = []
+        guild = interaction.guild
+        for i, rec in enumerate(rows, start=1):
+            name = f"User {rec.user_id}"
+            if guild is not None:
+                member = guild.get_member(int(rec.user_id))
+                if member is not None:
+                    name = display_name(member)
+            streak = format_streak_label(rec.streak, rec.streak_kind)
+            pct = f"{rec.win_pct * 100:.0f}%"
+            lines.append(
+                f"{i}. **{name}** — {rec.wins}-{rec.losses} ({pct}) · streak {streak}"
+            )
+        embed = discord.Embed(
+            title="🏆 Leaderboard",
+            description="\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text="Derived W/L · voided/expired/instant excluded")
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="record", description="Show a member's Fight Club record")
+    @app_commands.describe(user="Member to look up (defaults to you)")
+    async def record_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Records are only available in a server.", ephemeral=True
+            )
+            return
+        target = user or interaction.user
+        uid = int(target.id)
+        rec = record_for_user(get_db(), int(interaction.guild_id), uid)
+        name = display_name(target)
+        streak = format_streak_label(rec.streak, rec.streak_kind)
+        last5 = format_last5(rec.last5)
+        total = rec.wins + rec.losses
+        if total == 0:
+            body = f"**{name}** has no countable fights yet."
+        else:
+            body = (
+                f"**{name}** — **{rec.wins}-{rec.losses}**\n"
+                f"Current streak: **{streak}**\n"
+                f"Last 5: `{last5}`"
+            )
+        embed = discord.Embed(
+            title="📜 Record",
+            description=body,
+            color=discord.Color.dark_gold(),
+        )
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="laws", description="List the Laws of the Court")

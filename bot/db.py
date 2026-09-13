@@ -128,7 +128,9 @@ CREATE TABLE IF NOT EXISTS fights (
     ruled_at TEXT,
     archive_at TEXT,
     season_id INTEGER,
-    transcript_snapshot TEXT
+    transcript_snapshot TEXT,
+    forfeited_by INTEGER,
+    forfeited_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS exhibits (
@@ -223,6 +225,8 @@ _USAGE_V2_COLUMNS: tuple[tuple[str, str], ...] = (
 _FIGHTS_OPTIONAL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("retrieval_status", "TEXT"),
     ("transcript_snapshot", "TEXT"),
+    ("forfeited_by", "INTEGER"),
+    ("forfeited_at", "TEXT"),
 )
 
 

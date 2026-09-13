@@ -1014,8 +1014,9 @@ def forfeit_fight(
 ) -> dict[str, Any]:
     """Advocate forfeit → ``forfeited``.
 
-    Winner / L for the forfeiter is derived in item 9 (no fights.winner_*
-    columns in the item 2 schema). Caller already verified advocate + confirm.
+    Stamps ``forfeited_by`` / ``forfeited_at`` so item 9 can derive L for the
+    forfeiter and W for the other advocate (no fights.winner_* columns).
+    Caller already verified advocate + confirm.
     """
     sweep_deadlines(db, now)
     fight = db.get_fight(fight_id)
@@ -1026,7 +1027,13 @@ def forfeit_fight(
     if actor_advocate_side(fight, actor_id) is None:
         raise ValueError("Only advocates can /forfeit.")
 
-    db.update_fight(fight_id, status="forfeited")
+    # Item 9 derives W/L from forfeited_by (L) + the other advocate (W).
+    db.update_fight(
+        fight_id,
+        status="forfeited",
+        forfeited_by=int(actor_id),
+        forfeited_at=to_iso(as_datetime(now)),
+    )
     out = db.get_fight(fight_id)
     assert out is not None
     return out

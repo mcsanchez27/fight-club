@@ -237,11 +237,13 @@ def ruling_drop_embed(
     fight: dict[str, Any] | None = None,
     thin_record: bool = False,
     exhibit_ledger: Any | None = None,
+    flare_line: str | None = None,
 ) -> discord.Embed:
     """Full thread ruling drop (item 8): steelmans → ledger → ruling → winner.
 
     Field lengths clipped like V1 ``verdict_embed``. Optional thin-record banner
-    (Amendment 7) prepended to the description.
+    (Amendment 7) prepended to the description. Optional flare line (item 9)
+    appended after citations.
     """
     conf = float(v.get("confidence", 0) or 0)
     status = v.get("retrieval_status")
@@ -321,6 +323,10 @@ def ruling_drop_embed(
         value=_clip(_join_list(cite_lines)),
         inline=False,
     )
+
+    flare = flare_line or v.get("flare_line")
+    if flare:
+        embed.add_field(name="​", value=_clip(str(flare)), inline=False)
 
     footer_bits = ["Fight Club Court · initial ruling"]
     if status:

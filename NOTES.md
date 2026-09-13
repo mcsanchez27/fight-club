@@ -247,3 +247,24 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 53. **`archive_due(now)`** — pure helper for ruled fights past `archive_at`;
     mockable `archive_thread` callback; included in `sweep_deadlines`.
     `/reconsider` (10), `/config` (11), and leaderboard/flare (9) out of scope.
+
+## V2 item 9 (derived records / leaderboard / flare) — Sept 13 2026
+
+54. **Records are derived, never stored.** `bot/records.py` queries rulings
+    joined to fights (`kind in ('initial','reconsideration')`, latest per
+    fight) plus `status='forfeited'` rows. Voided / expired / instant fights
+    and V1 rulings without `fight_id` do not count.
+
+55. **Forfeit W/L** — Item 6 had no `winner_*` on fights. Additive columns
+    `forfeited_by` + `forfeited_at` (schema_version stays **2**). `/forfeit`
+    stamps the confirming advocate; derivation = L for `forfeited_by`, W for
+    the other advocate. Pre-item-9 forfeits without `forfeited_by` are skipped.
+
+56. **`/leaderboard`** top 15 by W then win% then user_id; streak column.
+    **`/record @user`** — W-L, current streak, last 5. Flare line on the
+    thread ruling embed via `ruling_drop_embed(..., flare_line=)` wired from
+    `drop_ruling_messages` after the ruling row exists.
+
+57. **Out of scope** — `/reconsider` (10), `/config` (11), instant refactor
+    (12), README (13).
+

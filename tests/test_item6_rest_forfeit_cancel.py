@@ -159,6 +159,8 @@ def test_forfeit_confirmation_sets_forfeited(tmp_path: Path) -> None:
     fight = _arguing(db)
     out = forfeit_fight(db, int(fight["id"]), now=FROZEN, actor_id=10)
     assert out["status"] == "forfeited"
+    assert int(out["forfeited_by"]) == 10
+    assert out.get("forfeited_at")
     db.close()
 
 

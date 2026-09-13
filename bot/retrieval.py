@@ -605,6 +605,141 @@ def retrieve(fighter_a: str, fighter_b: str, context: str | None = None, *, fran
     )
 
 
+def _merge_retrieval_results(parts: list[RetrievalResult]) -> RetrievalResult:
+    """Combine per-side retrieve() results under one accept-time status."""
+    if not parts:
+        return RetrievalResult(
+            franchise=None,
+            status="unavailable",
+            receipts=[],
+            exhibits=[],
+            retrieval_seconds=0.0,
+        )
+    receipts: list[Passage] = []
+    exhibits: list[Passage] = []
+    franchises: list[str] = []
+    seconds = 0.0
+    statuses: list[str] = []
+    for part in parts:
+        receipts.extend(part.receipts)
+        exhibits.extend(part.exhibits)
+        seconds += float(part.retrieval_seconds or 0.0)
+        statuses.append(part.status)
+        if part.franchise:
+            franchises.append(part.franchise)
+    # Re-number retrieval ids after merge.
+    seen: set[str] = set()
+    deduped: list[Passage] = []
+    for p in receipts:
+        key = f"{p.source_url}|{p.locator}"
+        if key in seen:
+            continue
+        seen.add(key)
+        p.retrieval_id = f"ret_{len(deduped) + 1}"
+        deduped.append(p)
+    if deduped:
+        status = "ok"
+    elif "unavailable" in statuses:
+        status = "unavailable"
+    elif all(s == "disabled" for s in statuses):
+        status = "disabled"
+    elif all(s in {"unlisted", "disabled"} for s in statuses):
+        status = "unlisted"
+    else:
+        status = statuses[0] if len(set(statuses)) == 1 else "unavailable"
+    franchise = franchises[0] if len(set(franchises)) == 1 else (franchises[0] if franchises else None)
+    return RetrievalResult(
+        franchise=franchise,
+        status=status,
+        receipts=deduped[:8],
+        exhibits=exhibits,
+        retrieval_seconds=round(seconds, 4),
+    )
+
+
+def retrieve_for_accept(
+    side_a: str,
+    side_b: str,
+    context: str | None = None,
+    *,
+    franchise_a: str | None = None,
+    franchise_b: str | None = None,
+    budget_seconds: float | None = None,
+) -> RetrievalResult:
+    """Accept-time retrieval using balance franchise keys (Tech Design §5 / C2).
+
+    Best-effort under the global ~10s budget (item 1 parallel retrieve). Never
+    raises for network/budget failure — caller always completes Accept.
+    """
+    budget = RETRIEVAL_BUDGET_SECONDS if budget_seconds is None else float(budget_seconds)
+    t0 = time.monotonic()
+    deadline = t0 + max(0.0, budget)
+    fa = (franchise_a or "").strip() or None
+    fb = (franchise_b or "").strip() or None
+
+    def _left() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    if not retrieval_enabled():
+        return RetrievalResult(
+            franchise=fa or fb,
+            status="disabled",
+            receipts=[],
+            exhibits=[],
+            retrieval_seconds=round(time.monotonic() - t0, 4),
+        )
+    if not fa and not fb:
+        return RetrievalResult(
+            franchise=None,
+            status="unlisted",
+            receipts=[],
+            exhibits=[],
+            retrieval_seconds=round(time.monotonic() - t0, 4),
+        )
+
+    # Same key (or only one listed): one retrieve for both sides.
+    if not fa or not fb or fa == fb:
+        key = fa or fb
+        assert key is not None
+        result = retrieve(
+            side_a,
+            side_b,
+            context,
+            franchise_hint=key,
+            budget_seconds=_left(),
+        )
+        result.retrieval_seconds = round(time.monotonic() - t0, 4)
+        return result
+
+    # Distinct franchises: per-side retrieves sharing the wall clock.
+    parts: list[RetrievalResult] = []
+    # Run sequentially with remaining budget so the global ceiling is hard.
+    # (Each retrieve() already parallelizes its own source fetches.)
+    if _left() > 0:
+        parts.append(
+            retrieve(side_a, "", context, franchise_hint=fa, budget_seconds=_left())
+        )
+    else:
+        parts.append(
+            RetrievalResult(
+                franchise=fa, status="unavailable", receipts=[], exhibits=[]
+            )
+        )
+    if _left() > 0:
+        parts.append(
+            retrieve("", side_b, context, franchise_hint=fb, budget_seconds=_left())
+        )
+    else:
+        parts.append(
+            RetrievalResult(
+                franchise=fb, status="unavailable", receipts=[], exhibits=[]
+            )
+        )
+    merged = _merge_retrieval_results(parts)
+    merged.retrieval_seconds = round(time.monotonic() - t0, 4)
+    return merged
+
+
 def clear_retrieval_cache() -> None:
     _CACHE.clear()
 

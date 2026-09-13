@@ -1,4 +1,4 @@
-"""V2 fight helpers — deadlines, Accept/Decline/Counter, balance warning (items 4a–4c).
+"""V2 fight helpers — deadlines, Accept/Decline/Counter, balance, accept receipts (4a–5).
 
 Pure functions take an explicit ``now`` so tests can freeze the clock.
 Do not rely on ``tasks.loop`` for correctness (amendment / C3).
@@ -366,7 +366,7 @@ def accept_fight(
 
     Only the button holder (challengee) may accept. Open-ended fights must have
     both sides filled before accept (modal path). Raises ``ValueError`` on
-    illegal transition. Thread creation is optional (item 5).
+    illegal transition. Caller supplies ``thread_id`` after creating the thread.
     """
     expire_due_fights(db, now)
     fight = db.get_fight(fight_id)
@@ -402,6 +402,115 @@ def accept_fight(
     out = db.get_fight(fight_id)
     assert out is not None
     return out
+
+
+OPENING_REST_LINE = "Each side `/rest` when done."
+
+
+def format_opening_message(fight: dict[str, Any]) -> str:
+    """Bot opening post in the argument thread (Tech Design §1 / §5)."""
+    side_a = str(fight.get("side_a") or "?").strip() or "?"
+    side_b = str(fight.get("side_b") or "?").strip() or "?"
+    context = fight.get("context")
+    adv_a = fight.get("advocate_a_id")
+    adv_b = fight.get("advocate_b_id")
+    lines = [
+        f"**Matchup:** {side_a} vs {side_b}",
+        f"**Side A:** {side_a}"
+        + (f" — <@{int(adv_a)}>" if adv_a is not None else ""),
+        f"**Side B:** {side_b}"
+        + (f" — <@{int(adv_b)}>" if adv_b is not None else ""),
+    ]
+    if context is not None and str(context).strip():
+        lines.append(f"**Context:** {str(context).strip()}")
+    lines.extend(
+        [
+            "",
+            "**Rules:** Argue in this thread. Cite sources when you can.",
+            "Advocates only — the bot stays silent until rest.",
+            OPENING_REST_LINE,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def fetch_and_store_accept_receipts(
+    db: CourtDB,
+    fight_id: int,
+    *,
+    budget_seconds: float | None = None,
+    retrieve_fn: Callable[..., Any] | None = None,
+) -> Any:
+    """Best-effort receipts at Accept (C2). Never raises; Accept always succeeds.
+
+    Uses ``franchise_a`` / ``franchise_b`` from the fight (balance-normalized).
+    Stores whatever landed in ``receipts`` keyed by ``fight_id`` and sets
+    ``fights.retrieval_status``. Does **not** create gallery exhibit rows.
+    """
+    from bot.retrieval import RetrievalResult, retrieve_for_accept
+
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        return RetrievalResult(
+            franchise=None, status="unavailable", receipts=[], exhibits=[]
+        )
+
+    fn = retrieve_fn or retrieve_for_accept
+    try:
+        result = fn(
+            str(fight.get("side_a") or ""),
+            str(fight.get("side_b") or ""),
+            fight.get("context"),
+            franchise_a=fight.get("franchise_a"),
+            franchise_b=fight.get("franchise_b"),
+            budget_seconds=budget_seconds,
+        )
+    except Exception:
+        result = RetrievalResult(
+            franchise=fight.get("franchise_a") or fight.get("franchise_b"),
+            status="unavailable",
+            receipts=[],
+            exhibits=[],
+        )
+
+    # Persist status + passages; replace any prior rows for this fight.
+    try:
+        db.clear_fight_receipts(fight_id)
+        for p in getattr(result, "receipts", None) or []:
+            as_dict = p.to_dict() if hasattr(p, "to_dict") else dict(p)
+            db.insert_receipt(
+                fight_id=fight_id,
+                claim=str(as_dict.get("claim") or ""),
+                source_url=as_dict.get("source_url"),
+                locator=as_dict.get("locator"),
+                snippet=as_dict.get("snippet"),
+                verified=bool(as_dict.get("verified")),
+                retrieved_at=as_dict.get("retrieved_at"),
+                kind=str(as_dict.get("kind") or "receipt"),
+                source_title=as_dict.get("source_title") or None,
+                retrieval_id=as_dict.get("retrieval_id") or None,
+                franchise=getattr(result, "franchise", None),
+                side=None,
+            )
+        db.update_fight(fight_id, retrieval_status=str(result.status))
+    except Exception:
+        try:
+            db.update_fight(fight_id, retrieval_status="unavailable")
+        except Exception:
+            pass
+        if not isinstance(result, RetrievalResult):
+            result = RetrievalResult(
+                franchise=None, status="unavailable", receipts=[], exhibits=[]
+            )
+        else:
+            result = RetrievalResult(
+                franchise=result.franchise,
+                status="unavailable",
+                receipts=list(result.receipts),
+                exhibits=list(result.exhibits),
+                retrieval_seconds=result.retrieval_seconds,
+            )
+    return result
 
 
 def decline_fight(

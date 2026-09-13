@@ -171,8 +171,28 @@ CREATE INDEX IF NOT EXISTS idx_fights_guild_status
     ON fights(guild_id, status);
 CREATE INDEX IF NOT EXISTS idx_fights_card_message
     ON fights(card_message_id);
+CREATE TABLE IF NOT EXISTS receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fight_id INTEGER NOT NULL,
+    claim TEXT NOT NULL,
+    source_url TEXT,
+    locator TEXT,
+    snippet TEXT,
+    verified INTEGER NOT NULL DEFAULT 0,
+    retrieved_at TEXT,
+    kind TEXT NOT NULL DEFAULT 'receipt',
+    source_title TEXT,
+    retrieval_id TEXT,
+    franchise TEXT,
+    side TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (fight_id) REFERENCES fights(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_exhibits_fight
     ON exhibits(fight_id);
+CREATE INDEX IF NOT EXISTS idx_receipts_fight
+    ON receipts(fight_id);
 """
 
 _RULINGS_V2_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -480,6 +500,66 @@ class CourtDB:
             (fight_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # --- receipts (accept-time, keyed by fight) ---------------------------
+
+    def clear_fight_receipts(self, fight_id: int) -> None:
+        self._conn.execute("DELETE FROM receipts WHERE fight_id = ?", (fight_id,))
+        self._conn.commit()
+
+    def insert_receipt(
+        self,
+        *,
+        fight_id: int,
+        claim: str,
+        source_url: str | None = None,
+        locator: str | None = None,
+        snippet: str | None = None,
+        verified: bool = False,
+        retrieved_at: str | None = None,
+        kind: str = "receipt",
+        source_title: str | None = None,
+        retrieval_id: str | None = None,
+        franchise: str | None = None,
+        side: str | None = None,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO receipts (
+                fight_id, claim, source_url, locator, snippet,
+                verified, retrieved_at, kind, source_title, retrieval_id,
+                franchise, side
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fight_id,
+                claim,
+                source_url,
+                locator,
+                snippet,
+                1 if verified else 0,
+                retrieved_at,
+                kind,
+                source_title,
+                retrieval_id,
+                franchise,
+                side,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def list_receipts(self, fight_id: int) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM receipts WHERE fight_id = ? ORDER BY id ASC",
+            (fight_id,),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["verified"] = bool(d.get("verified"))
+            out.append(d)
+        return out
 
     # --- guild_config -----------------------------------------------------
 

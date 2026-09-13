@@ -187,7 +187,7 @@ def test_migrate_v1_fixture_upgrades_cleanly(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert {"fights", "exhibits", "guild_config", "schema_version"} <= names
+    assert {"fights", "exhibits", "guild_config", "schema_version", "receipts"} <= names
 
     assert _FIGHT_COLS <= _cols(db, "fights")
     assert _EXHIBIT_COLS <= _cols(db, "exhibits")

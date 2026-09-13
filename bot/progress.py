@@ -6,6 +6,9 @@ from typing import Any
 
 PROGRESS_RETRIEVING = "Retrieving receipts…"
 PROGRESS_JUDGING = "Judging…"
+RECEIPTS_GAP_NOTE = (
+    "Receipts partial / unavailable — ruling will plead gaps."
+)
 
 
 async def edit_deferred_progress(interaction: Any, content: str) -> bool:

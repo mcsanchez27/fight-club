@@ -147,5 +147,26 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     `balance_warned` and the accepting actor is the advocate of the
     *unfavored* side (`balance_favored` is the favorite). Not a ruling.
 
-34. **Out of scope this commit** — item 5 thread receipts / retrieve-at-accept;
-    rest / judge drop; `/config` slash wiring (env + guild_config helpers only).
+34. **Out of scope in 4c** — completed by item 5 / pending rest+judge as noted below.
+
+## V2 item 5 (thread + receipts at accept) — Sept 13 2026
+
+35. **`receipts` table** — Additive fight-keyed storage for accept-time passages
+    (`fight_id, claim, source_url, locator, snippet, verified, retrieved_at,
+    kind, source_title, retrieval_id, franchise, side`). V1 `citations` stays
+    ruling-keyed. `schema_version` remains **2** (CREATE IF NOT EXISTS only).
+
+36. **Accept path** — progress "Retrieving receipts…" → balance (if sides
+    known) → `retrieve_for_accept` under 10s budget using `franchise_a` /
+    `franchise_b` → store passages + `fights.retrieval_status` → public thread
+    under the card with opening message (matchup, sides, context, rules,
+    "each side `/rest` when done") → status `arguing` + `accepted_at` +
+    `thread_id`. **Accept always succeeds** (C2); gap note when empty /
+    unavailable. No gallery exhibit rows (C4).
+
+37. **Dual franchise** — same key → one `retrieve()`; distinct keys → sequential
+    per-side retrieves sharing the wall clock (each call still parallelizes
+    sources). Unmapped both → `unlisted`.
+
+38. **Out of scope this commit** — `/rest` `/forfeit` `/cancel` (6); transcript
+    / exhibit extraction / contest (7); ruling drop (8+).

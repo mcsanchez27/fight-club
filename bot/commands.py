@@ -30,7 +30,9 @@ from bot.fights import (
     create_proposed_fight,
     decline_fight,
     expire_due_fights,
+    fetch_and_store_accept_receipts,
     fill_open_ended_accept,
+    format_opening_message,
     is_balance_free_counter_eligible,
     sides_complete,
     utc_now,
@@ -41,6 +43,7 @@ from bot.limits import limiter
 from bot.progress import (
     PROGRESS_JUDGING,
     PROGRESS_RETRIEVING,
+    RECEIPTS_GAP_NOTE,
     edit_deferred_progress,
 )
 from bot.retrieval import retrieve
@@ -380,7 +383,7 @@ class OpenEndedAcceptModal(discord.ui.Modal, title="Name your champion"):
         champion = (self.champion.component.value or "").strip()  # type: ignore[union-attr]
         context_val = (self.context.component.value or "").strip() or None  # type: ignore[union-attr]
         try:
-            fight = fill_open_ended_accept(
+            fill_open_ended_accept(
                 get_db(),
                 self.fight_id,
                 now=utc_now(),
@@ -388,23 +391,10 @@ class OpenEndedAcceptModal(discord.ui.Modal, title="Name your champion"):
                 champion=champion,
                 context=context_val,
             )
-            # Balance only after both sides known (A1); warning chrome on card.
-            try:
-                apply_balance_to_fight(get_db(), int(fight["id"]))
-            except Exception as e:
-                log.info("balance after open-ended accept skipped: %s", e)
-            thread_id = await _maybe_create_argument_thread(interaction, self.fight_id)
-            fight = accept_fight(
-                get_db(),
-                self.fight_id,
-                now=utc_now(),
-                actor_id=interaction.user.id,
-                thread_id=thread_id,
-            )
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
-        await _respond_accepted(interaction, fight)
+        await _complete_accept(interaction, self.fight_id, actor_id=interaction.user.id)
 
 
 class ChallengeCardView(discord.ui.View):
@@ -457,26 +447,7 @@ class ChallengeCardView(discord.ui.View):
                 return
             await interaction.response.send_modal(OpenEndedAcceptModal(fight_id))
             return
-        try:
-            # Thin thread stub (full receipts = item 5).
-            thread_id = await _maybe_create_argument_thread(interaction, fight_id)
-            # Both sides known — balance store + warning flag.
-            if sides_complete(fight):
-                try:
-                    apply_balance_to_fight(get_db(), fight_id)
-                except Exception as e:
-                    log.info("balance before accept skipped: %s", e)
-            fight = accept_fight(
-                get_db(),
-                fight_id,
-                now=utc_now(),
-                actor_id=interaction.user.id,
-                thread_id=thread_id,
-            )
-        except ValueError as e:
-            await interaction.response.send_message(str(e), ephemeral=True)
-            return
-        await _respond_accepted(interaction, fight)
+        await _complete_accept(interaction, fight_id, actor_id=interaction.user.id)
 
     async def on_decline(self, interaction: discord.Interaction) -> None:
         expire_due_fights(get_db(), utc_now())
@@ -521,8 +492,77 @@ class ChallengeCardView(discord.ui.View):
         await interaction.response.send_modal(CounterModal(self.fight_id))
 
 
+async def _complete_accept(
+    interaction: discord.Interaction,
+    fight_id: int,
+    *,
+    actor_id: int,
+) -> None:
+    """Accept path: progress → balance → receipts → thread/opening → arguing.
+
+    Receipts are best-effort under the 10s budget (C2). Accept always succeeds
+    even when retrieval is empty/unavailable. Never creates gallery exhibits.
+    """
+    db = get_db()
+    fight = db.get_fight(fight_id)
+    if fight is None:
+        await interaction.response.send_message("Fight not found.", ephemeral=True)
+        return
+
+    # Progress edit (C2) — do not void if this fails.
+    try:
+        if interaction.response.is_done() is not True:
+            await interaction.response.edit_message(
+                content=PROGRESS_RETRIEVING,
+                embed=challenge_card_embed(fight),
+                view=None,
+            )
+        else:
+            await edit_deferred_progress(interaction, PROGRESS_RETRIEVING)
+    except Exception as e:
+        log.info("accept progress skipped for fight %s: %s", fight_id, e)
+
+    if sides_complete(fight):
+        try:
+            apply_balance_to_fight(db, fight_id)
+        except Exception as e:
+            log.info("balance before accept skipped: %s", e)
+
+    # Receipts at accept (not at ruling) — never raises into a void.
+    result = await asyncio.to_thread(fetch_and_store_accept_receipts, db, fight_id)
+
+    thread_id = await _create_argument_thread(interaction, fight_id)
+
+    try:
+        fight = accept_fight(
+            db,
+            fight_id,
+            now=utc_now(),
+            actor_id=actor_id,
+            thread_id=thread_id,
+        )
+    except ValueError as e:
+        # Response may already be used by the progress edit.
+        done = interaction.response.is_done()
+        if done is True:
+            await interaction.followup.send(str(e), ephemeral=True)
+        else:
+            await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    gap = None
+    receipts = getattr(result, "receipts", None) or []
+    status = getattr(result, "status", None)
+    if status != "ok" or not receipts:
+        gap = RECEIPTS_GAP_NOTE
+    await _respond_accepted(interaction, fight, receipt_note=gap)
+
+
 async def _respond_accepted(
-    interaction: discord.Interaction, fight: dict[str, Any]
+    interaction: discord.Interaction,
+    fight: dict[str, Any],
+    *,
+    receipt_note: str | None = None,
 ) -> None:
     embed = challenge_card_embed(fight)
     embed.color = discord.Color.green()
@@ -531,22 +571,28 @@ async def _respond_accepted(
         + (
             f" · thread `{fight.get('thread_id')}`"
             if fight.get("thread_id")
-            else " · thread stub pending item 5"
+            else " · thread unavailable"
         )
     )
-    # Modal submits may already have deferred; button path uses edit_message.
+    if receipt_note:
+        note = f"{note}\n{receipt_note}"
+    # Modal submits / progress edit may already have used the response.
     # Compare with ``is True`` so MagicMock in tests is not treated as done.
     done = interaction.response.is_done()
     if done is True:
-        await interaction.edit_original_response(content=note, embed=embed, view=None)
+        edit = getattr(interaction, "edit_original_response", None)
+        if callable(edit):
+            await edit(content=note, embed=embed, view=None)
+        else:
+            await interaction.followup.send(content=note, embed=embed)
     else:
         await interaction.response.edit_message(content=note, embed=embed, view=None)
 
 
-async def _maybe_create_argument_thread(
+async def _create_argument_thread(
     interaction: discord.Interaction, fight_id: int
 ) -> int | None:
-    """Best-effort public thread under the card message. Full flow is item 5."""
+    """Public thread under the challenge card + opening message (item 5)."""
     fight = get_db().get_fight(fight_id)
     message = interaction.message
     if fight is None or message is None:
@@ -558,10 +604,22 @@ async def _maybe_create_argument_thread(
         return None
     try:
         thread = await create(name=name, auto_archive_duration=1440)
-        return int(getattr(thread, "id", 0) or 0) or None
     except Exception as e:
-        log.info("thread stub skipped for fight %s: %s", fight_id, e)
+        log.info("thread create skipped for fight %s: %s", fight_id, e)
         return None
+
+    opening = format_opening_message(fight)
+    send = getattr(thread, "send", None)
+    if callable(send):
+        try:
+            sent = send(opening)
+            if asyncio.iscoroutine(sent) or asyncio.isfuture(sent):
+                await sent  # type: ignore[misc]
+        except Exception as e:
+            log.info("opening message skipped for fight %s: %s", fight_id, e)
+
+    tid = int(getattr(thread, "id", 0) or 0) or None
+    return tid
 
 
 class FightCog(commands.Cog):

@@ -327,3 +327,21 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
 69. **Sonnet 5 API params** — Docs migration check (no live fight burn; `claude` CLI migrate not installed): `messages.create` + `deliver_verdict`/`balance_read` + `input_schema` + `tool_choice={"type":"tool","name":…}` + optional tool `"type":"custom"` + timeout/max_retries still valid. **Omit now done in code:** Anthropic `messages.create` paths no longer pass `temperature`/`top_p`/`top_k` (Sonnet 5 returns 400 for non-default sampling); OpenAI JSON paths still use `temperature=0.4`.
 
 70. **sweep_interval_minutes** — Per-guild `/config` key exists, but the single bot background loop reads global/env via `get_guild_config(..., guild_id=None)`.
+
+## V2 follow-up F3 (migration fixture hardening) — deferred, Sept 14 2026
+
+71. **Inline V1 fixture is self-confirming** — `test_v2_migration.py::test_migrate_v1_fixture_upgrades_cleanly`
+    builds a synthetic V1 schema inline with hand-written `CREATE TABLE`s, so it
+    asserts that *that fixture* migrates, not that the real historical schema
+    does — it would stay green even if the actual V1 shape had drifted from it.
+    Verified by hand instead: extracted `bot/db.py` at `a2b4754` (true V1,
+    rulings/docket) and `2ea808b` (Phase 3 + item 1, immediate pre-V2) out of git,
+    built databases with that historical code, seeded rulings/docket/citations/
+    rejudge/usage, then opened with current `CourtDB`. Both reached
+    schema_version 2, gained `fights`/`exhibits`/`guild_config`/`receipts`, kept
+    every row, and preserved every old column value byte-for-byte; old rows still
+    read through `get_ruling_by_message_id` / `list_guild_rulings`. A copy of the
+    live `court.db` opened three times unchanged (10 tables, 19 citations, 5 usage
+    events) — migration is idempotent. **Deferred:** replace the inline fixture
+    with a git-extracted one, parametrized over the two commits above. Not a
+    failure, a coverage gap.

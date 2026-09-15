@@ -38,6 +38,48 @@ def balance_model() -> str:
     return os.getenv("FIGHT_MODEL_BALANCE") or DEFAULT_MODEL_BALANCE
 
 
+ANTHROPIC_AUTH_MESSAGE = (
+    "Anthropic rejected the API key. Put a fresh key in .env as "
+    "ANTHROPIC_API_KEY=sk-ant-... — it is re-read automatically, so a running "
+    "bot does not need restarting."
+)
+
+
+class _AuthFailure(Exception):
+    """Internal: Anthropic returned 401. Never escapes this module."""
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True when the provider rejected the key (as opposed to any other error)."""
+    if getattr(exc, "status_code", None) == 401:
+        return True
+    try:
+        from anthropic import AuthenticationError
+
+        if isinstance(exc, AuthenticationError):
+            return True
+    except Exception:
+        pass
+    text = str(exc).lower()
+    return "authentication_error" in text or "api key is invalid" in text
+
+
+def reload_api_key() -> bool:
+    """Re-read .env after an auth failure; True when ANTHROPIC_API_KEY changed.
+
+    Keys get rotated while the bot is running. The process loaded its
+    environment once at startup, so without this a rotated key means a restart.
+    """
+    before = os.getenv("ANTHROPIC_API_KEY")
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=True)
+    except Exception:
+        return False
+    return os.getenv("ANTHROPIC_API_KEY") != before
+
+
 def make_anthropic_client():
     """Anthropic client with V2 latency settings: timeout=60, max_retries=1."""
     from anthropic import Anthropic
@@ -569,6 +611,8 @@ def _judge_anthropic(user_msg: str) -> dict[str, Any]:
                 tool_choice={"type": "tool", "name": "deliver_verdict"},
             )
         except Exception as e:
+            if _is_auth_error(e):
+                raise _AuthFailure(str(e)) from e
             raise RuntimeError(f"Anthropic request failed: {e}") from e
         return _extract_tool_verdict(resp), _usage_from_response(resp)
 
@@ -577,6 +621,16 @@ def _judge_anthropic(user_msg: str) -> dict[str, Any]:
     except ValueError:
         # Retry once on validation / missing-tool failure (app-level; SDK max_retries=1)
         verdict, usage = _call()
+    except _AuthFailure:
+        # The key may have been rotated since startup. Re-read .env and retry
+        # once rather than making an operator restart the bot mid-fight.
+        if not reload_api_key():
+            raise RuntimeError(ANTHROPIC_AUTH_MESSAGE) from None
+        client = make_anthropic_client()
+        try:
+            verdict, usage = _call()
+        except _AuthFailure:
+            raise RuntimeError(ANTHROPIC_AUTH_MESSAGE) from None
     return _attach_usage(verdict, usage)
 
 
@@ -680,7 +734,8 @@ def balance_read(
         "Do not rule the fight."
     )
     use_model = model or balance_model()
-    anthropic_client = client if client is not None else make_anthropic_client()
+    injected_client = client is not None
+    anthropic_client = client if injected_client else make_anthropic_client()
 
     def _call() -> tuple[dict[str, Any], dict[str, int]]:
         try:
@@ -693,6 +748,8 @@ def balance_read(
                 tool_choice={"type": "tool", "name": "balance_read"},
             )
         except Exception as e:
+            if _is_auth_error(e):
+                raise _AuthFailure(str(e)) from e
             raise RuntimeError(f"Balance read request failed: {e}") from e
         return _extract_balance_tool(resp), _usage_from_response(resp)
 
@@ -700,6 +757,15 @@ def balance_read(
         result, usage = _call()
     except ValueError:
         result, usage = _call()
+    except _AuthFailure:
+        # A caller-supplied client owns its own credentials — do not swap it.
+        if injected_client or not reload_api_key():
+            raise RuntimeError(ANTHROPIC_AUTH_MESSAGE) from None
+        anthropic_client = make_anthropic_client()
+        try:
+            result, usage = _call()
+        except _AuthFailure:
+            raise RuntimeError(ANTHROPIC_AUTH_MESSAGE) from None
     result["_usage"] = {
         **usage,
         "role": "balance",

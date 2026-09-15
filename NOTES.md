@@ -424,3 +424,22 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     `git add --renormalize .` produced no changes — the repo was already LF-clean,
     so this is purely preventive.
 
+## V2 follow-up F7 (key rotation mid-run) — Sept 14 2026
+
+78. **Rotated API key recovers without a restart** — Keys are cycled per dev
+    session. `load_dotenv()` runs once in `bot/__main__.py`, so a key rotated
+    while the bot is up left `os.environ` holding the dead one: every fight died
+    with a raw `401 authentication_error` traceback and the only cure was a full
+    restart. Hit live during the first Discord test. `judge._is_auth_error()`
+    distinguishes a rejected key from any other provider failure (401 status,
+    `AuthenticationError`, or the message text — a 529 overload or a timeout must
+    **not** trigger the rotation path); `reload_api_key()` re-reads `.env` with
+    `override=True` and reports whether the key actually changed. Both Anthropic
+    call sites (`_judge_anthropic`, `balance_read`) now raise an internal
+    `_AuthFailure`, reload, rebuild the client and retry **once**. Still bad, or
+    nothing to reload → `RuntimeError(ANTHROPIC_AUTH_MESSAGE)`, plain language,
+    no provider stack trace reaching the user. No reload when the key is
+    unchanged, so a genuinely dead key does not burn a second call. A
+    caller-injected client (tests, `balance_read(client=...)`) owns its own
+    credentials and is never swapped. 15 tests.
+

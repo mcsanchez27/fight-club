@@ -23,6 +23,7 @@ from bot.config import (
     format_config_value,
     get_guild_config,
     list_config_lines,
+    loop_sweep_interval,
     set_config,
 )
 from bot.db import get_db
@@ -978,8 +979,13 @@ async def fetch_thread_message_dicts(channel: Any, *, limit: int = 500) -> list[
 class FightCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Background interval: §7 sweep_interval_minutes (default 2), env/global.
-        minutes = float(get_guild_config(None, None, "sweep_interval_minutes"))
+        # Background interval: §7 sweep_interval_minutes (default 2) — tightest
+        # value across env/global and every guild override (one loop, many guilds).
+        try:
+            db = get_db()
+        except Exception:
+            db = None
+        minutes = loop_sweep_interval(db)
         if minutes > 0:
             self.rejudge_loop.change_interval(minutes=minutes)
         self.rejudge_loop.start()
@@ -1037,8 +1043,8 @@ class FightCog(commands.Cog):
             except RuntimeError:
                 pass
 
-        # Re-apply interval so env/guild-global overrides take effect without restart.
-        minutes = float(get_guild_config(get_db(), None, "sweep_interval_minutes"))
+        # Re-apply interval so env and per-guild overrides take effect without restart.
+        minutes = loop_sweep_interval(get_db())
         if minutes > 0:
             self.rejudge_loop.change_interval(minutes=minutes)
         sweep_deadlines(get_db(), utc_now(), archive_thread=_archive_cb)

@@ -345,3 +345,18 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     events) — migration is idempotent. **Deferred:** replace the inline fixture
     with a git-extracted one, parametrized over the two commits above. Not a
     failure, a coverage gap.
+
+## V2 follow-up F4 (sweep interval reconciliation) — Sept 14 2026
+
+72. **`sweep_interval_minutes` reconciles across guilds (closes 70)** — One
+    `tasks.loop` serves every guild, so a per-guild value cannot give that guild its
+    own tick; the old code resolved with `guild_id=None` and silently ignored every
+    override. `config.loop_sweep_interval(db)` now ticks at the **tightest** interval
+    any guild asked for (new `db.list_guild_config_for_key`), so a guild that sets `1`
+    gets one-minute sweeps and slower guilds are merely swept more often than they
+    asked. Sweeping early is free — deadlines are pure functions of fight rows, so a
+    sweep with nothing due is a no-op. Non-positive / junk rows written outside
+    `set_config` are skipped rather than stalling the loop, and `db=None` falls back to
+    env/global. Per-guild `get_guild_config` resolution is untouched; only the loop
+    reconciles. Applied at cog init and re-applied every tick, so `/config` retunes the
+    live loop without a restart. +6 tests.

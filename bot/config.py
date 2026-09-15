@@ -193,6 +193,50 @@ def get_guild_config(
     return default
 
 
+def loop_sweep_interval(db: CourtDB | None) -> float:
+    """Tick interval in minutes for the single background sweep loop.
+
+    One loop serves every guild, so a per-guild ``sweep_interval_minutes``
+    cannot give that guild its own tick. Instead the loop runs at the
+    *tightest* interval any guild asked for: a guild that set 1 gets swept
+    every minute, and guilds on a slower setting are only swept more often
+    than they asked. Sweeping early is harmless — deadlines are pure functions
+    of fight rows, so a sweep with nothing due is a no-op.
+
+    Falls back to the env/hardcoded global when there are no valid overrides.
+    """
+    key = "sweep_interval_minutes"
+    candidates: list[float] = []
+
+    try:
+        global_value = float(get_guild_config(db, None, key))
+        if global_value > 0:
+            candidates.append(global_value)
+    except (TypeError, ValueError):
+        pass
+
+    if db is not None:
+        try:
+            raws: Any = db.list_guild_config_for_key(key)
+        except Exception:
+            raws = []
+        # Only trust a real sequence back from SQLite (skip MagicMock etc.).
+        if isinstance(raws, (list, tuple)):
+            for raw in raws:
+                if not isinstance(raw, (str, int, float)) or isinstance(raw, bool):
+                    continue
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    candidates.append(value)
+
+    if not candidates:
+        return float(CONFIG_KEYS[key][0])
+    return min(candidates)
+
+
 def resolve_config(
     db: CourtDB | None,
     guild_id: int | None,

@@ -8,7 +8,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bot.config import CONFIG_KEYS, get_guild_config, resolve_config, set_config
+from bot.config import (
+    CONFIG_KEYS,
+    get_guild_config,
+    loop_sweep_interval,
+    resolve_config,
+    set_config,
+)
 from bot.db import CourtDB
 
 
@@ -91,3 +97,90 @@ def test_rejudge_loop_calls_sweep_then_queue(monkeypatch: pytest.MonkeyPatch) ->
 
     asyncio.run(FightCog.rejudge_loop.coro(cog))
     assert order == ["sweep", "queue"]
+
+
+# --- F4: one loop, many guilds — tick at the tightest interval asked for ------
+
+
+def test_loop_interval_uses_global_when_no_guild_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FIGHT_SWEEP_INTERVAL_MINUTES", raising=False)
+    db = _db(tmp_path)
+    assert loop_sweep_interval(db) == 2.0
+    monkeypatch.setenv("FIGHT_SWEEP_INTERVAL_MINUTES", "5")
+    assert loop_sweep_interval(db) == 5.0
+    db.close()
+
+
+def test_loop_interval_tightens_to_fastest_guild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guild asking for 1 gets 1 — the loop cannot tick per-guild (NOTES 70)."""
+    monkeypatch.setenv("FIGHT_SWEEP_INTERVAL_MINUTES", "5")
+    db = _db(tmp_path)
+    set_config(db, 42, "sweep_interval_minutes", "1")
+    set_config(db, 99, "sweep_interval_minutes", "10")
+    assert loop_sweep_interval(db) == 1.0
+    # Per-guild resolution is untouched — only the loop reconciles.
+    assert get_guild_config(db, 42, "sweep_interval_minutes") == 1
+    assert get_guild_config(db, 99, "sweep_interval_minutes") == 10
+    assert get_guild_config(db, 7, "sweep_interval_minutes") == 5
+    db.close()
+
+
+def test_loop_interval_ignores_slower_guilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Overrides slower than the global never slow the loop down."""
+    monkeypatch.setenv("FIGHT_SWEEP_INTERVAL_MINUTES", "3")
+    db = _db(tmp_path)
+    set_config(db, 42, "sweep_interval_minutes", "30")
+    assert loop_sweep_interval(db) == 3.0
+    db.close()
+
+
+def test_loop_interval_ignores_junk_and_nonpositive_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows written outside set_config must not stall or crash the loop."""
+    monkeypatch.setenv("FIGHT_SWEEP_INTERVAL_MINUTES", "4")
+    db = _db(tmp_path)
+    db.set_guild_config(1, "sweep_interval_minutes", "0")
+    db.set_guild_config(2, "sweep_interval_minutes", "-5")
+    db.set_guild_config(3, "sweep_interval_minutes", "banana")
+    assert loop_sweep_interval(db) == 4.0
+    db.close()
+
+
+def test_loop_interval_tolerates_no_db() -> None:
+    assert loop_sweep_interval(None) > 0
+
+
+def test_background_sweep_applies_tightest_guild_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: a guild override actually retunes the live loop."""
+    monkeypatch.setenv("FIGHT_SWEEP_INTERVAL_MINUTES", "5")
+    from bot.commands import FightCog
+
+    db = _db(tmp_path)
+    set_config(db, 42, "sweep_interval_minutes", "1")
+
+    cog = FightCog.__new__(FightCog)
+    cog.bot = MagicMock()
+    loop = MagicMock()
+    cog.rejudge_loop = loop
+
+    with (
+        patch("bot.commands.get_db", return_value=db),
+        patch("bot.commands.utc_now", return_value="2026-09-14T18:00:00+00:00"),
+        patch(
+            "bot.commands.sweep_deadlines",
+            return_value={"expired": [], "judge_ready": [], "archived": []},
+        ),
+    ):
+        asyncio.run(cog._run_background_sweep())
+
+    loop.change_interval.assert_called_with(minutes=1.0)
+    db.close()

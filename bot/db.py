@@ -627,6 +627,18 @@ class CourtDB:
         ).fetchall()
         return {str(r["key"]): str(r["value"]) for r in rows}
 
+    def list_guild_config_for_key(self, key: str) -> list[str]:
+        """Every guild's override of one key.
+
+        For loop-wide settings the bot must reconcile across guilds rather than
+        resolve for one; see ``config.loop_sweep_interval``.
+        """
+        rows = self._conn.execute(
+            "SELECT value FROM guild_config WHERE key = ? ORDER BY guild_id",
+            (key,),
+        ).fetchall()
+        return [str(r["value"]) for r in rows]
+
     # --- rulings (V1 + V2 extensions) -------------------------------------
 
     def insert_ruling(

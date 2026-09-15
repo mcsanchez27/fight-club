@@ -171,7 +171,10 @@ def _persist_ruling(
     voided = bool(verdict.get("voided"))
     retrieval_status = verdict.get("retrieval_status")
     franchise = verdict.get("franchise")
-    ruling_id = get_db().insert_ruling(
+    # Resolve once and thread it through: budget.record_estimated_usage falls
+    # back to its own module-level get_db(), which no caller here can patch.
+    db = get_db()
+    ruling_id = db.insert_ruling(
         message_id=message_id,
         channel_id=channel_id,
         guild_id=guild_id,
@@ -190,7 +193,7 @@ def _persist_ruling(
     # Only auto-retry hard fetch failures. Unlisted/disabled never become
     # ok without a config change, so don't spin the queue forever.
     if retrieval_status == "unavailable":
-        get_db().enqueue_rejudge(
+        db.enqueue_rejudge(
             ruling_id,
             reason=f"retrieval_status={retrieval_status}",
         )
@@ -208,6 +211,7 @@ def _persist_ruling(
     record_estimated_usage(
         tokens_in=tin,
         tokens_out=tout,
+        db=db,
         retrieval_seconds=u["retrieval_seconds"],
         judge_seconds=u["judge_seconds"],
         total_seconds=u["total_seconds"],

@@ -375,3 +375,26 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     **Deviation from 71:** the inline fixture in `test_v2_migration.py` is kept rather
     than replaced — it is the no-git fallback and a fast smoke test. Docstringed as
     synthetic so it is not mistaken for real-schema coverage.
+
+## V2 follow-up F5 (usage booking isolation) — Sept 14 2026
+
+74. **Tests were writing to the live `court.db` (module-namespace patch miss)** —
+    `_persist_ruling` resolved `get_db()` from `bot.commands`, which every test
+    patches, but then called `budget.record_estimated_usage(...)` **without** a
+    `db=`. That helper does `db = db or get_db()` against *`bot.budget`'s* own
+    namespace, so the patch never applied and each full pytest run booked one
+    phantom `usage_events` row into `data/court.db` — flat 2500/1000 estimates,
+    `$0.015` a run, counted against `monthly_usd_cap`. Found by instrumenting a
+    run after the first live CLI fight: the ledger held 7 rows / `$0.105` while
+    exactly one real call had been made. Fix: resolve `db = get_db()` once in
+    `_persist_ruling` and thread it through `insert_ruling`, `enqueue_rejudge`
+    and `record_estimated_usage`. `tests/test_f5_usage_db_isolation.py` patches
+    `bot.budget.get_db` to raise, so the fallback fails loudly instead of
+    polluting; all 6 fail against the old code. Phantom rows purged (backup taken;
+    `rulings`/`citations`/`fights` were all 0 — that db was a session artifact).
+
+75. **CLI books no usage at all** — `bot/cli.py` calls `judge()` and prints; it
+    never touches the db, so a real billed CLI fight is invisible to
+    `month_spend_usd` and the monthly cap. Deliberate-looking (no guild, no
+    ruling row) but worth a decision: the cap is a real-dollar hard stop and CLI
+    calls cost real dollars. **Open.**

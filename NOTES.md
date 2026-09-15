@@ -415,3 +415,12 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     timings 7.3/9.1 landed correctly at $0.013042. CLI had **zero** tests before
     this; now 9. Deliberately no opt-out flag — an escape hatch would reopen the
     hole 75 describes.
+
+77. **`.gitattributes` for line endings** — Windows sets `core.autocrlf=true`
+    globally, so checkouts rewrote LF to CRLF and every new file warned. Repo is
+    worked from Windows (desktop + laptop) and Linux, where that shows up as
+    whole-file diffs and whitespace-only conflicts. `* text=auto eol=lf` pins LF
+    everywhere and travels with the repo, so no per-machine git config is needed.
+    `git add --renormalize .` produced no changes — the repo was already LF-clean,
+    so this is purely preventive.
+

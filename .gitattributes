@@ -1,0 +1,22 @@
+# Line endings.
+#
+# This repo is worked on from Windows (desktop + laptop) and Linux. Without a
+# rule, Git's core.autocrlf=true on Windows rewrites line endings on checkout,
+# which can make a one-line change look like the whole file changed and can
+# create conflicts that are pure whitespace.
+#
+# text=auto  — treat text files as text and store them with LF in the repo
+# eol=lf     — check them out as LF everywhere, so no machine rewrites them
+#
+# Python, Git Bash, and modern Windows editors all handle LF fine.
+* text=auto eol=lf
+
+# Binary: never touch these.
+*.db binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary

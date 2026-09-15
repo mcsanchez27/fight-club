@@ -398,3 +398,20 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     `month_spend_usd` and the monthly cap. Deliberate-looking (no guild, no
     ruling row) but worth a decision: the cap is a real-dollar hard stop and CLI
     calls cost real dollars. **Open.**
+
+## V2 follow-up F6 (CLI usage booking) — Sept 14 2026
+
+76. **CLI now books usage (closes 75)** — A CLI fight is a real billed call, so
+    it counts against `monthly_usd_cap` the same as a Discord ruling. New
+    `budget.book_verdict_usage(verdict, db=...)` is the **single source of the
+    estimate fallback** (real `_usage` counts when the provider returned them,
+    else 5000/2500 in + 1000 out by `retrieval_status`); `_persist_ruling` and
+    `bot/cli.py` both route through it so the two paths cannot drift — there is a
+    parity test asserting the same verdict books identical numbers either way.
+    Booking is wrapped: a bookkeeping failure warns on stderr and still prints
+    the verdict, because the call is already paid for. Month-to-date goes to
+    **stderr** so piping the verdict stays clean. Verified against the real
+    `CourtDB` (not just mocks, which accept any kwargs): real counts 1811/942 and
+    timings 7.3/9.1 landed correctly at $0.013042. CLI had **zero** tests before
+    this; now 9. Deliberately no opt-out flag — an escape hatch would reopen the
+    hole 75 describes.

@@ -8,6 +8,8 @@ import sys
 
 from dotenv import load_dotenv
 
+from bot.budget import book_verdict_usage, current_month
+from bot.db import get_db
 from bot.judge import format_verdict_text, judge
 
 
@@ -50,6 +52,21 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"Error: Judge request failed: {e}", file=sys.stderr)
         return 1
+
+    # A CLI fight is a real billed call, so it counts against the monthly cap
+    # the same as a Discord ruling (NOTES 75). Never lose a verdict that has
+    # already been paid for to a bookkeeping failure — warn and carry on.
+    try:
+        db = get_db()
+        usd = book_verdict_usage(verdict, db=db)
+        month = current_month()
+        print(
+            f"Recorded {usd:.4f} USD estimated "
+            f"(month to date: {db.month_spend_usd(month):.4f}).",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(f"Warning: usage not recorded: {e}", file=sys.stderr)
 
     print(format_verdict_text(verdict))
     return 0

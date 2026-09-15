@@ -12,10 +12,9 @@ from discord.ext import commands, tasks
 
 from bot.budget import (
     assert_token_pack,
+    book_verdict_usage,
     check_budget,
     estimate_tokens,
-    record_estimated_usage,
-    usage_from_verdict,
 )
 from bot.config import (
     ConfigError,
@@ -171,7 +170,7 @@ def _persist_ruling(
     voided = bool(verdict.get("voided"))
     retrieval_status = verdict.get("retrieval_status")
     franchise = verdict.get("franchise")
-    # Resolve once and thread it through: budget.record_estimated_usage falls
+    # Resolve once and thread it through: the usage booking underneath falls
     # back to its own module-level get_db(), which no caller here can patch.
     db = get_db()
     ruling_id = db.insert_ruling(
@@ -201,21 +200,7 @@ def _persist_ruling(
         message_id, verdict, fighter_a=fighter_a, fighter_b=fighter_b,
         context=context, ruling_id=ruling_id, fight_id=fight_id, kind=kind,
     )
-    u = usage_from_verdict(verdict)
-    tin = u["tokens_in"]
-    tout = u["tokens_out"]
-    # Fallback to design-doc estimates when the provider did not return usage.
-    if tin <= 0 and tout <= 0:
-        tin = 5000 if retrieval_status == "ok" else 2500
-        tout = 1000
-    record_estimated_usage(
-        tokens_in=tin,
-        tokens_out=tout,
-        db=db,
-        retrieval_seconds=u["retrieval_seconds"],
-        judge_seconds=u["judge_seconds"],
-        total_seconds=u["total_seconds"],
-    )
+    book_verdict_usage(verdict, db=db)
     return ruling_id
 
 

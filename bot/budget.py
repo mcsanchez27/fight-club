@@ -127,3 +127,28 @@ def usage_from_verdict(verdict: dict) -> dict:
         "judge_seconds": float(raw.get("judge_seconds") or 0.0),
         "total_seconds": float(raw.get("total_seconds") or 0.0),
     }
+
+
+def book_verdict_usage(verdict: dict, *, db: CourtDB | None = None) -> float:
+    """Book one verdict's usage, preferring real provider counts over estimates.
+
+    Single source of the estimate fallback: the Discord path (_persist_ruling)
+    and the CLI both route through here so the two cannot drift apart. Returns
+    the estimated USD booked.
+    """
+    u = usage_from_verdict(verdict)
+    tokens_in = u["tokens_in"]
+    tokens_out = u["tokens_out"]
+    # Fallback to design-doc estimates when the provider did not return usage.
+    if tokens_in <= 0 and tokens_out <= 0:
+        tokens_in = 5000 if (verdict or {}).get("retrieval_status") == "ok" else 2500
+        tokens_out = 1000
+    return record_estimated_usage(
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        db=db,
+        retrieval_seconds=u["retrieval_seconds"],
+        judge_seconds=u["judge_seconds"],
+        total_seconds=u["total_seconds"],
+    )
+

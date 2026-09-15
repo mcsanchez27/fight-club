@@ -360,3 +360,18 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     env/global. Per-guild `get_guild_config` resolution is untouched; only the loop
     reconciles. Applied at cog init and re-applied every tick, so `/config` retunes the
     live loop without a restart. +6 tests.
+
+## V2 follow-up F3 (migration fixture hardening) — done, Sept 14 2026
+
+73. **Git-extracted V1 fixtures (closes 71)** — `tests/test_f3_migration_history.py`
+    runs `git show <commit>:bot/db.py` for `a2b4754` (true V1, rulings/docket) and
+    `2ea808b` (Phase 3 + item 1, immediate pre-V2), loads each standalone — both are
+    stdlib-only, no intra-package imports — seeds through whatever API that commit
+    actually had (`hasattr` gates citations / rejudge / usage), then opens with the
+    current `CourtDB`. Asserts schema_version 2, additive-only table set (`before <=
+    after`), every old column value byte-for-byte, V1 accessors still resolving the old
+    rows, and idempotent reopen. 4 tests × 2 commits. **Skips, not fails**, when the git
+    objects are unavailable, so a shallow clone or source tarball does not go red.
+    **Deviation from 71:** the inline fixture in `test_v2_migration.py` is kept rather
+    than replaced — it is the no-git fallback and a fast smoke test. Docstringed as
+    synthetic so it is not mistaken for real-schema coverage.

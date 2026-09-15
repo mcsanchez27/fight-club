@@ -161,6 +161,13 @@ def _cols(db: CourtDB, table: str) -> set[str]:
 
 
 def test_migrate_v1_fixture_upgrades_cleanly(tmp_path: Path) -> None:
+    """Synthetic V1 shape migrates cleanly.
+
+    This fixture is hand-written, so it confirms itself: it would stay green even
+    if the real V1 schema had drifted from it (NOTES 71). Coverage of the *actual*
+    historical schema lives in ``test_f3_migration_history.py``, which extracts
+    ``bot/db.py`` from git. Kept as a no-git fallback and a fast smoke test.
+    """
     path = tmp_path / "v1_court.db"
     _make_v1_db(path)
 

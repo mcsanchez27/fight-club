@@ -65,6 +65,7 @@ cp .env.example .env
 | `FIGHT_GUILD_DAILY_CAP` | no | max judge calls / guild / UTC day (default `50`) — §7 `daily_cap` |
 | `FIGHT_MONTHLY_USD_CAP` | no | estimated spend hard stop (default `20`) — §7 `monthly_usd_cap` |
 | `FIGHT_TOKEN_CEILING` | no | per-ruling in+out token estimate ceiling (default `16000`) |
+| `FIGHT_MAX_OUTPUT_TOKENS` | no | max output tokens per ruling (default `4096`, floor `1024`) — below ~2048 the verdict truncates and citations are dropped |
 | `FIGHT_RETRIEVAL_ENABLED` | no | `1`/`0` — disable autonomous wiki fetch (default `1`) |
 | `FIGHT_RETRIEVAL_BUDGET_SECONDS` | no | global wall-clock for parallel wiki fetch (default `10`) |
 | `FIGHT_USD_PER_MTOK_INPUT` | no | estimate $/M input (default `2.0` — Sonnet 5) |

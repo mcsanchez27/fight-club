@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -16,6 +17,8 @@ from bot.prompts import (
 )
 from bot.retrieval import RetrievalResult, pack_retrieval_for_prompt, retrieve
 from bot.sources import cap_snippet, is_stale, normalize_franchise_key
+
+log = logging.getLogger(__name__)
 
 # Model routing (Tech Design §4 / §9). Balance helper wired for item 3.
 DEFAULT_MODEL_RULING = "claude-sonnet-5"
@@ -123,6 +126,25 @@ VERDICT_TOOL_REQUIRED_FIELDS = (
 )
 
 # Soft-required core for validation (winner OR winner_side). V1 matchup optional.
+# Output budget for deliver_verdict. The verdict is long-form — two steelmans,
+# then the ruling, with citations LAST in VERDICT_FIELD_ORDER. At 2048 the tail
+# was truncated on essentially every fight (stop_reason=max_tokens), silently
+# dropping citations and sometimes `ruling` itself, which surfaced only as
+# "Verdict missing required field: ruling".
+RULING_MAX_OUTPUT_TOKENS_DEFAULT = 4096
+
+
+def ruling_max_output_tokens() -> int:
+    """Max output tokens for a ruling call; FIGHT_MAX_OUTPUT_TOKENS overrides."""
+    raw = os.getenv("FIGHT_MAX_OUTPUT_TOKENS", "").strip()
+    try:
+        value = int(raw) if raw else RULING_MAX_OUTPUT_TOKENS_DEFAULT
+    except (TypeError, ValueError):
+        value = RULING_MAX_OUTPUT_TOKENS_DEFAULT
+    # Never below the point where a verdict cannot physically fit.
+    return max(1024, value)
+
+
 VERDICT_CORE_REQUIRED = (
     "steelman_a",
     "steelman_b",
@@ -566,11 +588,33 @@ def apply_retrieval_guardrails(
     return out
 
 
+def _truncated(resp: Any) -> bool:
+    return getattr(resp, "stop_reason", None) == "max_tokens"
+
+
 def _extract_tool_verdict(resp: Any) -> dict[str, Any]:
     for block in resp.content:
         btype = getattr(block, "type", None)
         if btype == "tool_use" and getattr(block, "name", None) == "deliver_verdict":
-            return validate_verdict(dict(block.input))
+            payload = dict(block.input)
+            if _truncated(resp):
+                missing = [f for f in VERDICT_CORE_REQUIRED if f not in payload]
+                if missing:
+                    # Don't report this as a malformed verdict — the model was
+                    # cut off mid-write, which is a budget problem, not its fault.
+                    raise ValueError(
+                        "Ruling was cut off at the output limit "
+                        f"({ruling_max_output_tokens()} tokens) before writing: "
+                        f"{', '.join(missing)}. Raise FIGHT_MAX_OUTPUT_TOKENS."
+                    )
+                # Complete enough to rule, but the tail is gone. Citations are
+                # last in VERDICT_FIELD_ORDER, so they are what gets lost.
+                log.warning(
+                    "Verdict truncated at %d output tokens; trailing fields "
+                    "(citations, argument_quality) may be missing.",
+                    ruling_max_output_tokens(),
+                )
+            return validate_verdict(payload)
     raise ValueError("Anthropic response missing deliver_verdict tool use")
 
 
@@ -606,7 +650,7 @@ def _judge_anthropic(user_msg: str) -> dict[str, Any]:
                 model=model,
                 system=build_system_prompt(),
                 messages=[{"role": "user", "content": user_msg}],
-                max_tokens=2048,
+                max_tokens=ruling_max_output_tokens(),
                 tools=[DELIVER_VERDICT_TOOL],
                 tool_choice={"type": "tool", "name": "deliver_verdict"},
             )
@@ -818,7 +862,7 @@ def judge_with_materials(
                 model=use_model,
                 system=system,
                 messages=[{"role": "user", "content": msg}],
-                max_tokens=2048,
+                max_tokens=ruling_max_output_tokens(),
                 tools=[DELIVER_VERDICT_TOOL],
                 tool_choice={"type": "tool", "name": "deliver_verdict"},
             )

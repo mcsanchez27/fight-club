@@ -443,3 +443,27 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     caller-injected client (tests, `balance_read(client=...)`) owns its own
     credentials and is never swapped. 15 tests.
 
+## V2 follow-up F8 (ruling output budget) — Sept 14 2026
+
+79. **`max_tokens=2048` was truncating every ruling (citations lost)** — Surfaced
+    live as `Verdict missing required field: ruling`, which blamed the model for
+    what was a budget problem. Reproduced against the API: Goku vs Superman at
+    2048 returned `stop_reason=max_tokens`, 3189 in / **2048 out exactly**, with
+    `citations` and `argument_quality` cut off the end. `ruling` is 10th in
+    `VERDICT_FIELD_ORDER`, after both steelmans — so a verbose fight loses the
+    ruling itself, a terser one only loses the receipts. Natural length measured
+    **1966** output tokens, i.e. just under the old cap, which is why this was
+    intermittent and survived a whole V1 cycle: most fights squeaked through, and
+    the ones that didn't looked like model error. **A bot whose premise is
+    "rules with receipts" was silently shipping receipt-less rulings.** Fix:
+    `ruling_max_output_tokens()` (default **4096**, floor 1024, override
+    `FIGHT_MAX_OUTPUT_TOKENS`) on both ruling call sites — `_judge_anthropic`
+    and the V2 `deliver_verdict` path, which had the same literal. Re-verified:
+    `stop_reason=tool_use`, 1966 out, citations present. Raising the cap costs
+    nothing — output is billed per token generated, not per ceiling.
+    `_extract_tool_verdict` now separates the two cases: truncated **and**
+    missing a core field raises "Ruling was cut off at N tokens… raise
+    FIGHT_MAX_OUTPUT_TOKENS"; truncated but rulable logs a warning that the tail
+    (citations) is gone rather than passing a receipt-less verdict off silently.
+    A genuinely malformed verdict keeps the original error. 15 tests.
+

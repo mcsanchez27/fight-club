@@ -31,6 +31,7 @@ CONFIG_KEYS: dict[str, tuple[Any, str | None, str]] = {
     "thread_archive_delay_hours": (24.0, "FIGHT_THREAD_ARCHIVE_DELAY_HOURS", "float"),
     "transcript_max_tokens": (20_000, "FIGHT_TRANSCRIPT_MAX_TOKENS", "int"),
     "sweep_interval_minutes": (2, "FIGHT_SWEEP_INTERVAL_MINUTES", "int"),
+    "allow_self_fight": (False, "FIGHT_ALLOW_SELF_FIGHT", "bool"),
 }
 
 KNOWN_KEYS = frozenset(CONFIG_KEYS.keys())

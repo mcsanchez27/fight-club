@@ -195,16 +195,17 @@ def is_balance_free_counter_eligible(
 
 
 MISSING_FIGHT_PROMPT = (
-    "Need more to start a fight. Provide `opponent:@user` and "
-    '`matchup:"A vs B"` for a challenge card, or `opponent` + `side:"Champion"` '
-    "for an open-ended challenge, or set `instant:true` with a matchup "
-    "(or `fighter_a` + `fighter_b`) for a solo ruling. "
-    "No menus — fill the slash fields and run `/fight` again."
+    "Need more to start a fight.\n"
+    "• Challenge: `/fight opponent:@user champion_a:Name champion_b:Name`\n"
+    "• Open-ended: `/fight opponent:@user champion_a:YourChamp` "
+    "(they name theirs on Accept)\n"
+    "• Instant (solo): `/fight champion_a:Name champion_b:Name instant:true`\n"
+    "Optional: `context` for rules of engagement."
 )
 
 OPEN_ENDED_SIDE_PROMPT = (
-    "Open-ended challenges need `opponent:@user` and your champion in "
-    '`side:"Name"`. The challengee names their champion on Accept.'
+    "Open-ended challenge: set `opponent:@user` and your champion in "
+    "`champion_a`. Leave `champion_b` empty — they name their champion on Accept."
 )
 
 
@@ -223,65 +224,75 @@ class FightCommandPlan:
 def validate_fight_fields(
     *,
     opponent_id: int | None = None,
-    matchup: str | None = None,
     context: str | None = None,
-    side: str | None = None,
     instant: bool = False,
+    champion_a: str | None = None,
+    champion_b: str | None = None,
+    # Legacy aliases kept for tests / internal callers during migration.
+    matchup: str | None = None,
+    side: str | None = None,
     fighter_a: str | None = None,
     fighter_b: str | None = None,
 ) -> FightCommandPlan:
-    """Classify `/fight` into proposed-card, instant bridge, or ephemeral prompt.
+    """Classify `/fight` into proposed-card, instant, or ephemeral prompt.
 
-    Amendment 12 / §0: missing fields → text prompt only (no menus).
-    Open-ended (side without matchup) → proposed card with ``open_ended`` (4b).
+    V2.1 shape A: ``champion_a`` / ``champion_b`` (no matchup/side/fighter_*).
+    Open-ended: opponent + champion_a only → challengee names champion_b on Accept.
+    Instant: champion_a + champion_b + instant (opponent optional).
     """
     ctx = context.strip() if context and context.strip() else None
-    fa = fighter_a.strip() if fighter_a and fighter_a.strip() else None
-    fb = fighter_b.strip() if fighter_b and fighter_b.strip() else None
+    ca = (
+        (champion_a or fighter_a or "").strip()
+        or None
+    )
+    cb = (
+        (champion_b or fighter_b or "").strip()
+        or None
+    )
+    # Legacy: matchup "A vs B" and/or side token still accepted from old callers.
+    parsed = parse_matchup(matchup) if matchup else None
     side_tok = side.strip() if side and side.strip() else None
-    parsed = parse_matchup(matchup)
+    if parsed and not ca and not cb:
+        try:
+            ca, cb = resolve_sides(matchup or "", side_tok)
+        except ValueError:
+            ca = cb = None
+    elif side_tok and not ca:
+        ca = side_tok
 
-    # V1-compatible instant: explicit instant flag, or legacy fighter_a/b alone.
-    legacy_instant = fa is not None and fb is not None and opponent_id is None
-    wants_instant = bool(instant) or legacy_instant
-
-    if wants_instant:
-        if fa and fb:
-            return FightCommandPlan(
-                kind="instant", side_a=fa, side_b=fb, context=ctx
-            )
-        if parsed:
-            return FightCommandPlan(
-                kind="instant", side_a=parsed[0], side_b=parsed[1], context=ctx
-            )
+    wants_instant = bool(instant) or (
+        ca is not None and cb is not None and opponent_id is None and not instant
+        and (fighter_a or fighter_b)  # legacy solo path only
+    )
+    # Explicit instant flag with both champions.
+    if instant and ca and cb:
+        return FightCommandPlan(kind="instant", side_a=ca, side_b=cb, context=ctx)
+    if wants_instant and ca and cb:
+        return FightCommandPlan(kind="instant", side_a=ca, side_b=cb, context=ctx)
+    if instant:
         return FightCommandPlan(kind="prompt", prompt=MISSING_FIGHT_PROMPT)
 
-    # Proposed challenge card: opponent + parseable matchup.
-    if opponent_id is not None and parsed is not None:
-        try:
-            side_a, side_b = resolve_sides(matchup or "", side_tok)
-        except ValueError:
-            return FightCommandPlan(kind="prompt", prompt=MISSING_FIGHT_PROMPT)
+    # Proposed challenge: opponent + both champions.
+    if opponent_id is not None and ca and cb:
         return FightCommandPlan(
             kind="proposed",
-            side_a=side_a,
-            side_b=side_b,
+            side_a=ca,
+            side_b=cb,
             context=ctx,
             open_ended=False,
         )
 
-    # Open-ended (4b / lead lock A1): opponent + side, no full matchup.
-    if opponent_id is not None and side_tok and not parsed:
+    # Open-ended: opponent + champion_a only.
+    if opponent_id is not None and ca and not cb:
         return FightCommandPlan(
             kind="proposed",
-            side_a=side_tok,
+            side_a=ca,
             side_b=None,
             context=ctx,
             open_ended=True,
         )
 
-    # Opponent but neither matchup nor side.
-    if opponent_id is not None and not side_tok and not parsed:
+    if opponent_id is not None and not ca:
         return FightCommandPlan(kind="prompt", prompt=OPEN_ENDED_SIDE_PROMPT)
 
     return FightCommandPlan(kind="prompt", prompt=MISSING_FIGHT_PROMPT)
@@ -312,6 +323,31 @@ def expire_due_fights(db: CourtDB, now: datetime | str) -> list[int]:
     return expired_ids
 
 
+
+def actor_may_accept(fight: dict[str, Any], actor_id: int, db: CourtDB | None = None) -> bool:
+    """True if actor may Accept (challengee, or challenger when allow_self_fight)."""
+    holder = button_holder_id(fight)
+    if holder is None or int(actor_id) == int(holder):
+        return True
+    if db is None:
+        return False
+    from bot.config import get_guild_config
+
+    allow_self = bool(
+        get_guild_config(
+            db,
+            int(fight["guild_id"]) if fight.get("guild_id") is not None else None,
+            "allow_self_fight",
+        )
+    )
+    challenger = fight.get("challenger_id")
+    return bool(
+        allow_self
+        and challenger is not None
+        and int(actor_id) == int(challenger)
+    )
+
+
 def accept_fight(
     db: CourtDB,
     fight_id: int,
@@ -334,8 +370,7 @@ def accept_fight(
         raise ValueError("This challenge has expired.")
     if fight["status"] != "proposed":
         raise ValueError(f"Cannot accept a fight in status={fight['status']!r}.")
-    holder = button_holder_id(fight)
-    if holder is not None and int(actor_id) != int(holder):
+    if not actor_may_accept(fight, actor_id, db):
         raise ValueError("Only the challenged user can Accept.")
     if not sides_complete(fight):
         raise ValueError(
@@ -520,8 +555,7 @@ def fill_open_ended_accept(
         raise ValueError(f"Cannot fill sides in status={fight['status']!r}.")
     if not fight.get("open_ended"):
         raise ValueError("This challenge is not open-ended.")
-    holder = button_holder_id(fight)
-    if holder is not None and int(actor_id) != int(holder):
+    if not actor_may_accept(fight, actor_id, db):
         raise ValueError("Only the challenged user can Accept.")
     name = champion.strip() if champion else ""
     if not name:

@@ -23,7 +23,9 @@ def main() -> int:
 
     intents = discord.Intents.default()
     # Privileged Message Content — required for fight-thread transcripts (amendment 13 / C7).
-    # Also enable Message Content Intent in the Discord Developer Portal.
+    # Portal toggle MUST be on: if code requests this intent but the Developer Portal
+    # has it disabled, discord.py raises PrivilegedIntentsRequired and the process
+    # exits before on_ready (so the warning below never runs). Keep the hard require.
     intents.message_content = True
     bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -39,6 +41,13 @@ def main() -> int:
                 "Without it, thread transcript reading will fail.",
                 file=sys.stderr,
             )
+        # B7: non-fatal ping of every allowlisted source.
+        try:
+            from bot.retrieval import log_allowlisted_source_health
+
+            await asyncio.to_thread(log_allowlisted_source_health)
+        except Exception as e:
+            print(f"[sources] health check skipped: {e}", file=sys.stderr)
         try:
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} app command(s)")

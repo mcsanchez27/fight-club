@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from bot.config import CONFIG_KEYS, get_guild_config, set_config
+from bot.config import (
+    CONFIG_KEYS,
+    allow_self_fight_enabled_somewhere,
+    get_guild_config,
+    set_config,
+)
 from bot.db import CourtDB
 from bot.embeds import challenge_card_embed, ruling_drop_embed, verdict_embed
 from bot.fights import (
@@ -26,10 +31,13 @@ from bot.judge import (
 from bot.retrieval import (
     Passage,
     RetrievalResult,
+    _first_article_url_from_search_html,
+    _html_url_is_verified,
     _is_nav_boilerplate,
     _looks_like_article_snippet,
     _strip_wiki_nav_chrome,
     check_allowlisted_sources,
+    log_allowlisted_source_health,
     passage_supports_claim,
 )
 from bot.sources import load_sources_config, mediawiki_api_url
@@ -311,4 +319,90 @@ def test_t1_allow_self_fight_enables_challenger_accept(tmp_path: Path) -> None:
     assert actor_may_accept(fight, 10, db) is True
     out = accept_fight(db, int(fight["id"]), now=FROZEN, actor_id=10)
     assert out["status"] == "arguing"
+    db.close()
+
+
+# --- Prime follow-up nits ---
+
+
+def test_verdict_embed_passes_thin_record_bit() -> None:
+    """verdict_embed must not hardcode thin=False; banner survives via verdict bit."""
+    from bot.embeds import THIN_RECORD_BANNER
+
+    v = _verdict(
+        thin_record=True,
+        thin_record_banner=THIN_RECORD_BANNER,
+        ruling="A wins on the available record.",
+    )
+    embed = verdict_embed(v)
+    assert THIN_RECORD_BANNER in (embed.description or "")
+    assert "thin record" in (embed.footer.text or "").lower()
+
+
+def test_html_search_resolves_first_article_url() -> None:
+    base = "https://www.kanzenshuu.com"
+    html = """
+    <html><body>
+      <a href="/?s=Goku">Search again</a>
+      <a href="/tag/saiyan">Tag</a>
+      <a href="https://evil.example/wiki/Goku">Offsite</a>
+      <a href="/guides/goku-power-levels">Goku power levels</a>
+      <a href="/guides/other">Other</a>
+    </body></html>
+    """
+    got = _first_article_url_from_search_html(html, base)
+    assert got == f"{base}/guides/goku-power-levels"
+    assert _html_url_is_verified(got, base) is True
+    assert _first_article_url_from_search_html("<a href='/?s=x'>x</a>", base) is None
+
+
+def test_source_health_debounced(monkeypatch) -> None:
+    import bot.retrieval as retrieval
+
+    monkeypatch.setattr(retrieval, "_SOURCE_HEALTH_LAST_MONO", None)
+    monkeypatch.setattr(retrieval, "_SOURCE_HEALTH_TTL_SECONDS", 3600.0)
+    calls = {"n": 0}
+
+    def fake_check(*, timeout: float = 5.0):
+        calls["n"] += 1
+        return [
+            {
+                "franchise": "x",
+                "name": "y",
+                "base_url": "https://example.com",
+                "ok": True,
+                "detail": "ok",
+            }
+        ]
+
+    monkeypatch.setattr(retrieval, "check_allowlisted_sources", fake_check)
+    first = log_allowlisted_source_health(timeout=1.0)
+    second = log_allowlisted_source_health(timeout=1.0)
+    assert calls["n"] == 1
+    assert len(first) == 1
+    assert second == []
+    third = log_allowlisted_source_health(timeout=1.0, force=True)
+    assert calls["n"] == 2
+    assert len(third) == 1
+
+
+def test_t1_allow_self_fight_opponent_is_me_both_champions(tmp_path: Path) -> None:
+    """Self-fight (challenger==challengee) with both champions named may Accept."""
+    db = _db(tmp_path)
+    set_config(db, 1, "allow_self_fight", "true")
+    fight = create_proposed_fight(
+        db,
+        guild_id=1,
+        channel_id=2,
+        challenger_id=10,
+        challengee_id=10,  # opponent == me
+        side_a="Goku",
+        side_b="Vegeta",
+        context=None,
+        now=FROZEN,
+    )
+    assert actor_may_accept(fight, 10, db) is True
+    out = accept_fight(db, int(fight["id"]), now=FROZEN, actor_id=10)
+    assert out["status"] == "arguing"
+    assert allow_self_fight_enabled_somewhere(db) is True
     db.close()

@@ -187,6 +187,51 @@ def _html_url_is_verified(url: str, base: str) -> bool:
     return True
 
 
+_HREF_RE = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def _first_article_url_from_search_html(html: str, base: str) -> str | None:
+    """Resolve the first same-host non-search article URL from search-results HTML.
+
+    Search pages (``/?s=``, ``/search?q=``) are never verified receipts; callers must
+    fetch this resolved article URL and verify against it instead.
+    """
+    if not html or not base:
+        return None
+    base = base.rstrip("/")
+    base_host = (urllib.parse.urlparse(base).hostname or "").lower()
+    skip_path_bits = (
+        "/tag/",
+        "/tags/",
+        "/category/",
+        "/categories/",
+        "/author/",
+        "/wp-login",
+        "/wp-admin",
+        "/feed",
+        "/page/",
+    )
+    for raw in _HREF_RE.findall(html):
+        href = urllib.parse.unquote(raw.strip())
+        if not href or href.startswith(("javascript:", "mailto:", "data:", "#")):
+            continue
+        abs_url = urllib.parse.urljoin(base + "/", href)
+        parsed = urllib.parse.urlparse(abs_url)
+        host = (parsed.hostname or "").lower()
+        if host != base_host:
+            continue
+        clean = urllib.parse.urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, "")
+        )
+        path_l = (parsed.path or "").lower()
+        if any(bit in path_l for bit in skip_path_bits):
+            continue
+        if not _html_url_is_verified(clean, base):
+            continue
+        return clean
+    return None
+
+
 def _mediawiki_extract_text(
     api: str, title: str, *, deadline: float | None = None
 ) -> tuple[str, dict[str, Any]]:
@@ -349,6 +394,8 @@ def _html_search_snippet(
 ) -> list[Passage]:
     """Best-effort HTML fetch for non-MediaWiki allowlisted sites (e.g. Kanzenshuu).
 
+    Search URLs (``/?s=``, ``/search?q=``) are never verified. Resolve the first real
+    article URL from search HTML, fetch that page, then verify.
     Never treats the bare homepage as a verified receipt; homepage is not a candidate.
     """
     if deadline is not None and time.monotonic() >= deadline:
@@ -368,8 +415,22 @@ def _html_search_snippet(
             raw = _http_get(url, deadline=deadline)
         except Exception:
             continue
+        html = raw.decode("utf-8", errors="replace")
+        article_url = _first_article_url_from_search_html(html, base)
+        if not article_url:
+            # Search page itself can never verify — skip this candidate.
+            continue
+        if not url_allowed(article_url, franchise_key):
+            if urllib.parse.urlparse(article_url).hostname != urllib.parse.urlparse(base).hostname:
+                continue
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        try:
+            art_raw = _http_get(article_url, deadline=deadline)
+        except Exception:
+            continue
         body = _strip_wiki_nav_chrome(
-            _strip_html(raw.decode("utf-8", errors="replace"))
+            _strip_html(art_raw.decode("utf-8", errors="replace"))
         )
         lower = body.lower()
         needle = query.lower().split()[0] if query.strip() else ""
@@ -378,7 +439,6 @@ def _html_search_snippet(
         snippet_src = re.sub(r"\s+", " ", snippet_src).strip()
         if not _looks_like_article_snippet(snippet_src, query):
             continue
-        article_url = url if url_allowed(url, franchise_key) else base
         claim = f"{query} ({source_name})"
         snippet = cap_snippet(snippet_src)
         verified = bool(
@@ -928,15 +988,41 @@ def check_allowlisted_sources(
                 entry["detail"] = f"http {len(raw)} bytes" if raw else "empty"
         except Exception as e:
             entry["ok"] = False
-            entry["detail"] = f"{type(e).__name__}: {e}"
+            entry["detail"] = type(e).__name__  # short; avoid wiki junk / secrets in logs
         results.append(entry)
     return results
 
 
-def log_allowlisted_source_health(*, timeout: float = 5.0) -> list[dict]:
-    """Run ``check_allowlisted_sources`` and print a non-fatal startup report."""
+# Process-lifetime / TTL debounce for startup wiki health (avoid reconnect hammer).
+_SOURCE_HEALTH_LAST_MONO: float | None = None
+_SOURCE_HEALTH_TTL_SECONDS = float(os.getenv("FIGHT_SOURCE_HEALTH_TTL_SECONDS", "3600"))
+
+
+def log_allowlisted_source_health(
+    *, timeout: float = 5.0, force: bool = False
+) -> list[dict]:
+    """Run ``check_allowlisted_sources`` and print a non-fatal startup report.
+
+    Debounced: once per process by default, or again after
+    ``FIGHT_SOURCE_HEALTH_TTL_SECONDS`` (default 3600). Pass ``force=True`` to bypass.
+    """
     import sys
 
+    global _SOURCE_HEALTH_LAST_MONO
+    now = time.monotonic()
+    if (
+        not force
+        and _SOURCE_HEALTH_LAST_MONO is not None
+        and (now - _SOURCE_HEALTH_LAST_MONO) < _SOURCE_HEALTH_TTL_SECONDS
+    ):
+        print(
+            f"[sources] health check debounced "
+            f"(last {now - _SOURCE_HEALTH_LAST_MONO:.0f}s ago; "
+            f"ttl={_SOURCE_HEALTH_TTL_SECONDS:.0f}s)",
+            file=sys.stdout,
+        )
+        return []
+    _SOURCE_HEALTH_LAST_MONO = now
     rows = check_allowlisted_sources(timeout=timeout)
     failed = [r for r in rows if not r.get("ok")]
     for r in rows:

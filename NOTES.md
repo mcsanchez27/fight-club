@@ -511,3 +511,14 @@ Bug batch against the V2 spec (Testing & Results + V3 Scoping DRAFT). Branch
 - **T2** Friend / alt-account side B = human gate only (not automated).
 
 **Parked:** B13 (`argument_quality`), B14 (double-launch watch).
+
+
+### V2.1 follow-up — Prime review nits (parked)
+
+- **Winner resolver prefers `fight.side_*` over model `winner` string.** When
+  `winner_side` is set, the compact embed shows `fight.side_a` / `side_b` even if
+  the model `winner` string has a typo. Known V2.1 behavior — do not flip without
+  a product call; typos in the model name still "show" the card's champion labels.
+- **Full steelmans for power users.** Thread jump link already carries the detail
+  drop; optional later "full ruling" jump / expand is out of scope for this nit
+  pass (behavior unchanged).

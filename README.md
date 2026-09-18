@@ -133,7 +133,7 @@ python -m bot
   - Missing bits → ephemeral text prompt (no menus in V2)
   - Open-ended: `opponent` + `champion_a` (omit `champion_b`) → challengee names champion on Accept
   - `instant:true` → skip card/thread, rule immediately (V1 path on a fight row)
-- **Accept / Decline / Counter** — buttons on the challenge card (persistent view). Counter opens a modal (matchup / context / swap sides). Open-ended Accept opens a champion modal. Balance warning shows as **⚖️ Referee's read** and may label **Counter (free)**.
+- **Accept / Decline / Counter** — buttons on the challenge card (persistent view). Counter opens a modal with **Matchup (optional)** (free-text `A vs B` rewrite — not the removed `/fight matchup` slash field), **Context (optional)**, and **Swap sides**. Open-ended Accept opens a champion modal. Balance warning shows as **⚖️ Referee's read** and may label **Counter (free)**.
 - **`/rest`** — advocate + in-thread. First rest starts the rest deadline; second (or timeout) → judge path.
 - **`/forfeit`** — advocate + in-thread; Confirm button → L for you, W for the other.
 - **`/cancel`** — advocate + in-thread handshake; both must run it → voided (no record).

@@ -41,13 +41,34 @@ def main() -> int:
                 "Without it, thread transcript reading will fail.",
                 file=sys.stderr,
             )
-        # B7: non-fatal ping of every allowlisted source.
+        # B7: non-fatal ping of every allowlisted source (debounced in retrieval).
         try:
             from bot.retrieval import log_allowlisted_source_health
 
             await asyncio.to_thread(log_allowlisted_source_health)
         except Exception as e:
-            print(f"[sources] health check skipped: {e}", file=sys.stderr)
+            print(
+                f"[sources] health check skipped: {type(e).__name__}",
+                file=sys.stderr,
+            )
+        # Loud warn when allow_self_fight is on anywhere (test harness — do not rot in prod).
+        try:
+            from bot.config import allow_self_fight_enabled_somewhere
+            from bot.db import get_db
+
+            if allow_self_fight_enabled_somewhere(get_db()):
+                print(
+                    "WARNING: allow_self_fight is ENABLED (env and/or guild_config). "
+                    "Challengers can Accept their own cards — test harness only. "
+                    "Turn off via `/config allow_self_fight false` and unset "
+                    "FIGHT_ALLOW_SELF_FIGHT before treating this as production.",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(
+                f"[config] allow_self_fight check skipped: {type(e).__name__}",
+                file=sys.stderr,
+            )
         try:
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} app command(s)")

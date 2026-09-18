@@ -83,7 +83,11 @@ def _ruling_description(v: dict[str, Any], *, unavailable: bool, thin: bool) -> 
     # Prefer a short ruling; clip hard so steelmans don't blow the embed.
     body = _clip(ruling, 900)
     parts: list[str] = []
-    if thin or v.get("thin_record"):
+    # Defensive: banner survives if a caller hardcodes thin=False / omits the flag.
+    show_thin = bool(
+        thin or v.get("thin_record") or v.get("thin_record_banner")
+    )
+    if show_thin:
         banner = str(v.get("thin_record_banner") or THIN_RECORD_BANNER)
         parts.append(f"**{banner}**")
     if unavailable:
@@ -129,10 +133,11 @@ def verdict_embed(v: dict[str, Any], *, fight: dict[str, Any] | None = None) -> 
 
     matchup = _resolve_matchup(v, fight)
     winner = _resolve_winner_name(v, fight)
+    thin = bool(v.get("thin_record") or v.get("thin_record_banner"))
 
     embed = discord.Embed(
         title=f"⚔ {_clip(matchup, 250)}",
-        description=_ruling_description(v, unavailable=unavailable, thin=False),
+        description=_ruling_description(v, unavailable=unavailable, thin=thin),
         color=color,
     )
     # Winner + confidence on one conceptual line (two inline fields).
@@ -173,6 +178,8 @@ def verdict_embed(v: dict[str, Any], *, fight: dict[str, Any] | None = None) -> 
 
     footer_bits = ["Fight Club Court · rulings revisable on new evidence"]
     footer_bits.extend(_receipt_footer_bits(v, status=status, cites=cites))
+    if thin:
+        footer_bits.append("thin record")
     embed.set_footer(text=" · ".join(footer_bits))
     return embed
 

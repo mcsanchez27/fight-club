@@ -267,6 +267,26 @@ def set_config(
     return coerced
 
 
+
+def allow_self_fight_enabled_somewhere(db: CourtDB | None = None) -> bool:
+    """True if env default or any guild_config has ``allow_self_fight`` on.
+
+    Used for a loud startup warning so the test harness does not rot in prod.
+    """
+    # Env / hardcoded default (no guild override).
+    if bool(get_guild_config(db, None, "allow_self_fight")):
+        return True
+    if db is None:
+        return False
+    for raw in db.list_guild_config_for_key("allow_self_fight"):
+        try:
+            if _as_bool(raw):
+                return True
+        except ConfigError:
+            continue
+    return False
+
+
 def channel_allowed(
     db: CourtDB | None,
     guild_id: int | None,

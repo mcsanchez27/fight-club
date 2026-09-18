@@ -41,6 +41,7 @@ from bot.fights import (
     MISSING_FIGHT_PROMPT,
     RULED_STATUS,
     accept_fight,
+    actor_may_accept,
     actor_advocate_side,
     apply_balance_to_fight,
     archive_due,
@@ -521,28 +522,16 @@ class ChallengeCardView(discord.ui.View):
         if fight is None:
             await interaction.response.send_message("Fight not found.", ephemeral=True)
             return
+        # Gate before progress edit / modal so allow_self_fight (incl. opponent==me)
+        # is honored and unauthorized clicks don't strip the card.
+        if not actor_may_accept(fight, interaction.user.id, get_db()):
+            await interaction.response.send_message(
+                "Only the challenged user can Accept.",
+                ephemeral=True,
+            )
+            return
         # Open-ended with missing side_b → modal for champion (lead lock A1).
         if fight.get("open_ended") and not sides_complete(fight):
-            holder = button_holder_id(fight)
-            if holder is not None and int(interaction.user.id) != int(holder):
-                allow_self = bool(
-                    get_guild_config(
-                        get_db(),
-                        int(fight["guild_id"]) if fight.get("guild_id") is not None else None,
-                        "allow_self_fight",
-                    )
-                )
-                challenger = fight.get("challenger_id")
-                if not (
-                    allow_self
-                    and challenger is not None
-                    and int(interaction.user.id) == int(challenger)
-                ):
-                    await interaction.response.send_message(
-                        "Only the challenged user can Accept.",
-                        ephemeral=True,
-                    )
-                    return
             await interaction.response.send_modal(OpenEndedAcceptModal(fight_id))
             return
         await _complete_accept(interaction, fight_id, actor_id=interaction.user.id)

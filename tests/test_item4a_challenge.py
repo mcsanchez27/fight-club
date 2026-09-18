@@ -58,21 +58,36 @@ def test_validate_fight_fields_ephemeral_prompt_when_missing() -> None:
 
 
 def test_validate_fight_fields_proposed_and_instant() -> None:
+    # V2.1 shape A — champion_a / champion_b
     prop = validate_fight_fields(
-        opponent_id=2, matchup="Aragorn vs Goku", side="B", context="no ki"
+        opponent_id=2,
+        champion_a="Goku",
+        champion_b="Aragorn",
+        context="no ki",
     )
     assert prop.kind == "proposed"
     assert prop.side_a == "Goku"
     assert prop.side_b == "Aragorn"
     assert prop.context == "no ki"
+    assert prop.open_ended is False
 
-    inst = validate_fight_fields(instant=True, matchup="A vs B")
+    inst = validate_fight_fields(
+        instant=True, champion_a="A", champion_b="B"
+    )
     assert inst.kind == "instant"
     assert inst.side_a == "A" and inst.side_b == "B"
 
+    open_ended = validate_fight_fields(opponent_id=99, champion_a="Aragorn")
+    assert open_ended.kind == "proposed" and open_ended.open_ended is True
+
+    # Legacy aliases still accepted by the helper (slash command dropped them).
     legacy = validate_fight_fields(fighter_a="X", fighter_b="Y")
     assert legacy.kind == "instant"
     assert legacy.side_a == "X" and legacy.side_b == "Y"
+    prop_legacy = validate_fight_fields(
+        opponent_id=2, matchup="Aragorn vs Goku", side="B"
+    )
+    assert prop_legacy.side_a == "Goku" and prop_legacy.side_b == "Aragorn"
 
 
 def test_challenge_timeout_hours_guild_overrides_env(

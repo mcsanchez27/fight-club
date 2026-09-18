@@ -73,7 +73,8 @@ def test_confidence_capped_when_retrieval_unavailable() -> None:
     out = apply_retrieval_guardrails(v, result)
     assert out["confidence"] <= UNVERIFIED_CONFIDENCE_CAP
     assert out["confidence"] == 5.0
-    assert out["voided"] is True
+    # B8: retrieval gaps must not flip the lifecycle voided flag.
+    assert out.get("voided") in (None, False)
     assert any("retrieval unavailable" in u for u in out["unknowns"])
 
 

@@ -21,7 +21,9 @@ from bot.sources import (
     detect_franchise,
     franchise_sources,
     is_hard_no_url,
+    iter_allowlisted_sources,
     load_sources_config,
+    mediawiki_api_url,
     url_allowed,
 )
 
@@ -185,6 +187,51 @@ def _html_url_is_verified(url: str, base: str) -> bool:
     return True
 
 
+_HREF_RE = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def _first_article_url_from_search_html(html: str, base: str) -> str | None:
+    """Resolve the first same-host non-search article URL from search-results HTML.
+
+    Search pages (``/?s=``, ``/search?q=``) are never verified receipts; callers must
+    fetch this resolved article URL and verify against it instead.
+    """
+    if not html or not base:
+        return None
+    base = base.rstrip("/")
+    base_host = (urllib.parse.urlparse(base).hostname or "").lower()
+    skip_path_bits = (
+        "/tag/",
+        "/tags/",
+        "/category/",
+        "/categories/",
+        "/author/",
+        "/wp-login",
+        "/wp-admin",
+        "/feed",
+        "/page/",
+    )
+    for raw in _HREF_RE.findall(html):
+        href = urllib.parse.unquote(raw.strip())
+        if not href or href.startswith(("javascript:", "mailto:", "data:", "#")):
+            continue
+        abs_url = urllib.parse.urljoin(base + "/", href)
+        parsed = urllib.parse.urlparse(abs_url)
+        host = (parsed.hostname or "").lower()
+        if host != base_host:
+            continue
+        clean = urllib.parse.urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, "")
+        )
+        path_l = (parsed.path or "").lower()
+        if any(bit in path_l for bit in skip_path_bits):
+            continue
+        if not _html_url_is_verified(clean, base):
+            continue
+        return clean
+    return None
+
+
 def _mediawiki_extract_text(
     api: str, title: str, *, deadline: float | None = None
 ) -> tuple[str, dict[str, Any]]:
@@ -253,16 +300,23 @@ def _mediawiki_passage_from_title(
     actual_title = str(page.get("title") or title)
     if not _title_matches_query(actual_title, query):
         return None
-    if not extract or len(extract.split()) < 8:
+    body = _strip_wiki_nav_chrome(extract or "")
+    if not body or len(body.split()) < 12:
+        return None
+    # Title already matched; reject nav chrome only. Do not require the name
+    # to reappear inside an intro quote (Fandom often leads with dialogue).
+    if _is_nav_boilerplate(body) or _SEARCH_CHROME.search(body):
         return None
     fullurl = _page_fullurl(base, actual_title, page)
     if not url_allowed(fullurl, franchise_key):
         return None
+    claim = f"{actual_title} (wiki extract)"
+    snippet = cap_snippet(body)
     return Passage(
-        claim=f"{actual_title} (wiki extract)",
+        claim=claim,
         source_url=fullurl,
         locator=f"{source_name} · {actual_title}",
-        snippet=cap_snippet(extract),
+        snippet=snippet,
         verified=True,
         retrieved_at=now,
         kind="receipt",
@@ -277,12 +331,13 @@ def _mediawiki_search_and_extract(
     franchise_key: str,
     *,
     deadline: float | None = None,
+    api_path: str | None = None,
 ) -> list[Passage]:
     """Exact-title lookup first (titles=), then filtered search; reject weak title matches."""
     if deadline is not None and time.monotonic() >= deadline:
         return []
     base = base_url.rstrip("/")
-    api = f"{base}/api.php"
+    api = mediawiki_api_url(base, api_path)
     now = _now_iso()
     q = (query or "").strip()
     if not q:
@@ -339,6 +394,8 @@ def _html_search_snippet(
 ) -> list[Passage]:
     """Best-effort HTML fetch for non-MediaWiki allowlisted sites (e.g. Kanzenshuu).
 
+    Search URLs (``/?s=``, ``/search?q=``) are never verified. Resolve the first real
+    article URL from search HTML, fetch that page, then verify.
     Never treats the bare homepage as a verified receipt; homepage is not a candidate.
     """
     if deadline is not None and time.monotonic() >= deadline:
@@ -358,7 +415,23 @@ def _html_search_snippet(
             raw = _http_get(url, deadline=deadline)
         except Exception:
             continue
-        body = _strip_html(raw.decode("utf-8", errors="replace"))
+        html = raw.decode("utf-8", errors="replace")
+        article_url = _first_article_url_from_search_html(html, base)
+        if not article_url:
+            # Search page itself can never verify — skip this candidate.
+            continue
+        if not url_allowed(article_url, franchise_key):
+            if urllib.parse.urlparse(article_url).hostname != urllib.parse.urlparse(base).hostname:
+                continue
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        try:
+            art_raw = _http_get(article_url, deadline=deadline)
+        except Exception:
+            continue
+        body = _strip_wiki_nav_chrome(
+            _strip_html(art_raw.decode("utf-8", errors="replace"))
+        )
         lower = body.lower()
         needle = query.lower().split()[0] if query.strip() else ""
         idx = lower.find(needle) if needle else -1
@@ -366,15 +439,21 @@ def _html_search_snippet(
         snippet_src = re.sub(r"\s+", " ", snippet_src).strip()
         if not _looks_like_article_snippet(snippet_src, query):
             continue
-        article_url = url if url_allowed(url, franchise_key) else base
-        verified = _html_url_is_verified(article_url, base)
+        claim = f"{query} ({source_name})"
+        snippet = cap_snippet(snippet_src)
+        verified = bool(
+            _html_url_is_verified(article_url, base)
+            and passage_supports_claim(snippet, claim, query=query)
+        )
+        if not verified:
+            continue
         return [
             Passage(
-                claim=f"{query} ({source_name})",
+                claim=claim,
                 source_url=article_url,
                 locator=f"{source_name} · search:{query}",
-                snippet=cap_snippet(snippet_src),
-                verified=verified,
+                snippet=snippet,
+                verified=True,
                 retrieved_at=now,
                 kind="receipt",
                 source_title=source_name,
@@ -384,22 +463,91 @@ def _html_search_snippet(
 
 
 _SEARCH_CHROME = re.compile(
-    r"you searched for|search results|forum wiki news|general info faqs|press archive|newbie guide|\bno results\b",
+    r"you searched for|search results|forum wiki news|general info faqs|press archive|"
+    r"newbie guide|\bno results\b|articles on \w+|introduction\s*[•·|]\s*biography|"
+    r"power and abilities\s*[•·|]\s*(?:misc|gallery|techniques)|"
+    r"jump to (?:content|navigation)|^\s*contents\b",
+    re.IGNORECASE,
+)
+
+# Leading Fandom / wiki tab chrome before real article body.
+_NAV_PREFIX = re.compile(
+    r"^(?:Articles on [^\n]+?\s+)?"
+    r"(?:Introduction\s*[•·|]\s*)?"
+    r"(?:Biography\s*[•·|]\s*)?"
+    r"(?:Power and Abilities\s*[•·|]\s*)?"
+    r"(?:Techniques\s*[•·|]\s*)?"
+    r"(?:Forms\s*[•·|]\s*)?"
+    r"(?:Misc\s*[•·|]\s*)?"
+    r"(?:Gallery\s+)?",
+    re.IGNORECASE,
+)
+_DISAMBIG_PREFIX = re.compile(
+    r"^This article is about[^.]*\.\s*(?:For other uses[^.]*\.\s*)?",
     re.IGNORECASE,
 )
 
 
+def _strip_wiki_nav_chrome(text: str) -> str:
+    """Drop Fandom tab chrome / disambiguation lead-in; keep body prose."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t:
+        return ""
+    t = _NAV_PREFIX.sub("", t, count=1).strip()
+    t = _DISAMBIG_PREFIX.sub("", t, count=1).strip()
+    return t
+
+
+def _is_nav_boilerplate(text: str) -> bool:
+    """True when the passage is mostly navigation / TOC, not article body."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if _SEARCH_CHROME.search(t):
+        # Pure chrome short strings, or chrome-only after strip
+        body = _strip_wiki_nav_chrome(t)
+        if len(body.split()) < 12:
+            return True
+        # Still dominated by middot-separated TOC tokens
+        if t.count("•") + t.count("·") >= 3 and len(body.split()) < 20:
+            return True
+    # Middot TOC with little else
+    if (t.count("•") + t.count("·")) >= 3 and len(t.split()) < 16:
+        return True
+    return False
+
+
 def _looks_like_article_snippet(text: str, query: str) -> bool:
-    """Reject nav/search chrome so junk HTML does not count as a verified receipt."""
-    words = (text or "").split()
+    """Reject nav/search chrome so junk does not count as a verified receipt.
+
+    Verified passages must be body prose that mentions the query token.
+    """
+    body = _strip_wiki_nav_chrome(text or "")
+    words = body.split()
     if len(words) < 12:
         return False
-    if _SEARCH_CHROME.search(text or ""):
+    if _is_nav_boilerplate(body) or _SEARCH_CHROME.search(body):
         return False
     needle = (query or "").lower().split()[0] if query else ""
-    if needle and needle not in text.lower():
+    if needle and needle not in body.lower():
         return False
     return True
+
+
+def passage_supports_claim(snippet: str, claim: str, query: str = "") -> bool:
+    """Body text must support the claim/query before verified=true."""
+    body = _strip_wiki_nav_chrome(snippet or "")
+    if _is_nav_boilerplate(body) or not body:
+        return False
+    tokens: list[str] = []
+    for raw in (query, claim):
+        for tok in re.findall(r"[A-Za-z0-9']+", (raw or "").lower()):
+            if len(tok) >= 3 and tok not in {"the", "and", "wiki", "extract", "for"}:
+                tokens.append(tok)
+    if not tokens:
+        return len(body.split()) >= 12
+    lower = body.lower()
+    return any(tok in lower for tok in tokens)
 
 
 def _fetch_one_source(
@@ -422,7 +570,12 @@ def _fetch_one_source(
     try:
         if api == "mediawiki":
             return _mediawiki_search_and_extract(
-                base, query, name, franchise_key, deadline=deadline
+                base,
+                query,
+                name,
+                franchise_key,
+                deadline=deadline,
+                api_path=str(src.get("api_path") or "") or None,
             )
         return _html_search_snippet(
             base, query, name, franchise_key, deadline=deadline
@@ -749,8 +902,23 @@ def pack_retrieval_for_prompt(result: RetrievalResult) -> str:
     lines: list[str] = [f"RETRIEVAL_STATUS: {result.status}"]
     if result.franchise:
         lines.append(f"FRANCHISE: {result.franchise}")
+    verified_n = sum(1 for p in result.receipts if p.verified)
     if result.retrieval_unavailable:
-        lines.append("Retrieval unavailable or franchise unlisted. Put missing canon in unknowns (legal plea). Do NOT invent URLs. Confidence will be capped at 5/10.")
+        lines.append(
+            "Retrieval unavailable or franchise unlisted. Put missing canon in "
+            "unknowns (legal plea). Do NOT invent URLs. Confidence is capped at "
+            "5/10 (guardrail caps; do not flatten every lean to the same mid score)."
+        )
+    elif verified_n == 0:
+        lines.append(
+            "No verified body-text receipts. Put gaps in unknowns. Confidence is "
+            "capped at 5/10 until receipts support the lean."
+        )
+    else:
+        lines.append(
+            f"{verified_n} verified receipt(s) packed. Confidence may exceed 5/10 "
+            "when the lean is well-supported; do not under-score a sourced fight."
+        )
     if result.receipts:
         lines.append("RECEIPTS (autonomous fetch — cite these for load-bearing ruling/concessions):")
         for p in result.receipts:
@@ -763,3 +931,113 @@ def pack_retrieval_for_prompt(result: RetrievalResult) -> str:
     if not result.receipts and not result.exhibits:
         lines.append("No receipts or exhibits packed.")
     return "\n".join(lines)
+
+
+def check_allowlisted_sources(
+    *,
+    timeout: float = 5.0,
+    cfg: dict | None = None,
+) -> list[dict]:
+    """Ping every allowlisted source (non-fatal health check).
+
+    Returns a list of ``{franchise, name, base_url, ok, detail}`` dicts.
+    Callers should log failures and continue — never crash the bot.
+    """
+    results: list[dict] = []
+    for franchise_key, src in iter_allowlisted_sources(cfg):
+        name = str(src.get("name") or "source")
+        base = str(src.get("base_url") or "").rstrip("/")
+        api_kind = str(src.get("api") or "mediawiki")
+        entry: dict = {
+            "franchise": franchise_key,
+            "name": name,
+            "base_url": base,
+            "ok": False,
+            "detail": "",
+        }
+        if not base:
+            entry["detail"] = "missing base_url"
+            results.append(entry)
+            continue
+        try:
+            if api_kind == "mediawiki":
+                api = mediawiki_api_url(base, str(src.get("api_path") or "") or None)
+                probe = (
+                    api
+                    + "?"
+                    + urllib.parse.urlencode(
+                        {
+                            "action": "query",
+                            "meta": "siteinfo",
+                            "siprop": "general",
+                            "format": "json",
+                        }
+                    )
+                )
+                raw = _http_get(probe, timeout=timeout)
+                data = json.loads(raw.decode("utf-8", errors="replace"))
+                sitename = (
+                    ((data.get("query") or {}).get("general") or {}).get("sitename")
+                    or ""
+                )
+                entry["ok"] = True
+                entry["detail"] = sitename or "ok"
+            else:
+                raw = _http_get(base + "/", timeout=timeout)
+                entry["ok"] = bool(raw)
+                entry["detail"] = f"http {len(raw)} bytes" if raw else "empty"
+        except Exception as e:
+            entry["ok"] = False
+            entry["detail"] = type(e).__name__  # short; avoid wiki junk / secrets in logs
+        results.append(entry)
+    return results
+
+
+# Process-lifetime / TTL debounce for startup wiki health (avoid reconnect hammer).
+_SOURCE_HEALTH_LAST_MONO: float | None = None
+_SOURCE_HEALTH_TTL_SECONDS = float(os.getenv("FIGHT_SOURCE_HEALTH_TTL_SECONDS", "3600"))
+
+
+def log_allowlisted_source_health(
+    *, timeout: float = 5.0, force: bool = False
+) -> list[dict]:
+    """Run ``check_allowlisted_sources`` and print a non-fatal startup report.
+
+    Debounced: once per process by default, or again after
+    ``FIGHT_SOURCE_HEALTH_TTL_SECONDS`` (default 3600). Pass ``force=True`` to bypass.
+    """
+    import sys
+
+    global _SOURCE_HEALTH_LAST_MONO
+    now = time.monotonic()
+    if (
+        not force
+        and _SOURCE_HEALTH_LAST_MONO is not None
+        and (now - _SOURCE_HEALTH_LAST_MONO) < _SOURCE_HEALTH_TTL_SECONDS
+    ):
+        print(
+            f"[sources] health check debounced "
+            f"(last {now - _SOURCE_HEALTH_LAST_MONO:.0f}s ago; "
+            f"ttl={_SOURCE_HEALTH_TTL_SECONDS:.0f}s)",
+            file=sys.stdout,
+        )
+        return []
+    _SOURCE_HEALTH_LAST_MONO = now
+    rows = check_allowlisted_sources(timeout=timeout)
+    failed = [r for r in rows if not r.get("ok")]
+    for r in rows:
+        flag = "ok" if r.get("ok") else "FAIL"
+        print(
+            f"[sources] {flag}: {r.get('franchise')}/{r.get('name')} "
+            f"({r.get('base_url')}) — {r.get('detail')}",
+            file=sys.stderr if not r.get("ok") else sys.stdout,
+        )
+    if failed:
+        print(
+            f"[sources] {len(failed)}/{len(rows)} allowlisted source(s) failed "
+            "health check (non-fatal; retrieval may be unavailable for those).",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[sources] all {len(rows)} allowlisted source(s) reachable")
+    return rows

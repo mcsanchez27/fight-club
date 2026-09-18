@@ -31,6 +31,7 @@ CONFIG_KEYS: dict[str, tuple[Any, str | None, str]] = {
     "thread_archive_delay_hours": (24.0, "FIGHT_THREAD_ARCHIVE_DELAY_HOURS", "float"),
     "transcript_max_tokens": (20_000, "FIGHT_TRANSCRIPT_MAX_TOKENS", "int"),
     "sweep_interval_minutes": (2, "FIGHT_SWEEP_INTERVAL_MINUTES", "int"),
+    "allow_self_fight": (False, "FIGHT_ALLOW_SELF_FIGHT", "bool"),
 }
 
 KNOWN_KEYS = frozenset(CONFIG_KEYS.keys())
@@ -264,6 +265,26 @@ def set_config(
     stored = _format_stored(coerced, type_tag)
     db.set_guild_config(int(guild_id), key, stored)
     return coerced
+
+
+
+def allow_self_fight_enabled_somewhere(db: CourtDB | None = None) -> bool:
+    """True if env default or any guild_config has ``allow_self_fight`` on.
+
+    Used for a loud startup warning so the test harness does not rot in prod.
+    """
+    # Env / hardcoded default (no guild override).
+    if bool(get_guild_config(db, None, "allow_self_fight")):
+        return True
+    if db is None:
+        return False
+    for raw in db.list_guild_config_for_key("allow_self_fight"):
+        try:
+            if _as_bool(raw):
+                return True
+        except ConfigError:
+            continue
+    return False
 
 
 def channel_allowed(

@@ -8,7 +8,7 @@ Lean stack: `discord.py`, Anthropic (preferred) or OpenAI-compatible chat comple
 
 ## V2 loop
 
-1. **`/fight`** → challenge card with **Accept / Decline / Counter** (optional open-ended: you name only your side; challengee picks their champion on Accept).
+1. **`/fight`** → challenge card with **Accept / Decline / Counter** (optional open-ended: you set `champion_a` only; challengee names `champion_b` on Accept). Card echoes **Matchup: A vs B** before anyone accepts.
 2. **Accept** → public thread under the card; advocates argue; gallery is ignored by the referee.
 3. Each advocate **`/rest`** (after the first rest, the other side has a timeout before the court rules on what's there).
 4. Referee rules on the transcript snapshot + receipts. Full verdict in the thread; one-line win post in the channel with a jump link.
@@ -36,7 +36,7 @@ cp .env.example .env
 4. **Privileged Message Content intent** (amendment 13 / C7) — required for thread transcripts:
    1. Developer Portal → your app → **Bot** → **Privileged Gateway Intents** → enable **Message Content Intent**.
    2. In code, `Intents.message_content = True` (see `bot/__main__.py`). Portal toggle alone is not enough.
-   3. Startup logs a **warning** if Message Content is missing. Transcript reading needs it; without it, history can look empty even when advocates posted (distinct from a real thin record).
+   3. **Portal toggle is mandatory.** If code requests Message Content but the Portal has it off, discord.py raises `PrivilegedIntentsRequired` and the process **exits before** `on_ready` (so you will not see a soft warning). After a successful connect, startup still logs a warning if the intent flag is somehow off on the connection. Transcript reading needs it; without it, history can look empty even when advocates posted (distinct from a real thin record).
 5. OAuth2 → URL Generator:
    - Scopes: `bot`, `applications.commands`
    - Bot permissions (minimum for V2):
@@ -99,6 +99,7 @@ Writable with `/config` (`Manage Server`). Precedence: **env default &lt; guild 
 | `allowed_channels` | `[]` | Empty = all channels; else only listed IDs |
 | `thread_archive_delay_hours` | `24` | Archive fight thread after ruling |
 | `transcript_max_tokens` | `20000` | Middle-truncation cap for the judge pack |
+| `allow_self_fight` | `false` | Admin-only test harness: challenger may Accept their own card |
 | `sweep_interval_minutes` | `2` | Background loop: deadline sweep (+ rejudge queue) |
 
 ## Run
@@ -127,12 +128,12 @@ python -m bot
 ### V2 fight loop
 
 - **`/fight`** — every field optional:
-  - `opponent`, `matchup`, `context`, `side`, `instant`
-  - V1 bridge for instant: `fighter_a`, `fighter_b`, `franchise`, `exhibits`
+  - `opponent`, `champion_a`, `champion_b`, `context`, `instant`
+  - Instant: `champion_a` + `champion_b` + `instant:true` (optional `franchise`, `exhibits`)
   - Missing bits → ephemeral text prompt (no menus in V2)
-  - Open-ended: `opponent` + `side` without `matchup` → challengee names champion on Accept
+  - Open-ended: `opponent` + `champion_a` (omit `champion_b`) → challengee names champion on Accept
   - `instant:true` → skip card/thread, rule immediately (V1 path on a fight row)
-- **Accept / Decline / Counter** — buttons on the challenge card (persistent view). Counter opens a modal (matchup / context / swap sides). Open-ended Accept opens a champion modal. Balance warning shows as **⚖️ Referee's read** and may label **Counter (free)**.
+- **Accept / Decline / Counter** — buttons on the challenge card (persistent view). Counter opens a modal with **Matchup (optional)** (free-text `A vs B` rewrite — not the removed `/fight matchup` slash field), **Context (optional)**, and **Swap sides**. Open-ended Accept opens a champion modal. Balance warning shows as **⚖️ Referee's read** and may label **Counter (free)**.
 - **`/rest`** — advocate + in-thread. First rest starts the rest deadline; second (or timeout) → judge path.
 - **`/forfeit`** — advocate + in-thread; Confirm button → L for you, W for the other.
 - **`/cancel`** — advocate + in-thread handshake; both must run it → voided (no record).
@@ -245,6 +246,6 @@ Local commits on `main` from `165a520` (Round 3 receipts). **Cloud Agents unavai
 | `b8c479a` | **12** | `instant:true` on fight rows; Challenge limited to instant rulings |
 | *(this)* | **13** | README: commands, config, intents/permissions, this session report |
 
-Pytest count at end of item **12**: **182**. After this README (+ Message Content intent wiring) change: **`182 passed`** (`pytest -q`).
+Pytest count at end of item **12**: **182**. V2 follow-ups F3–F8: **248**. V2.1 Fix the Court: see branch / PR (suite grew past 248).
 
 **Out of scope (not built):** guided setup / menus · points · titles · server-wide flare (roles, nicknames) · gallery polls · seasons · model A/B / OpenRouter / `/rejudge` · live per-message refereeing · Notion integration · admin panel UI.

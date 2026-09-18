@@ -467,3 +467,58 @@ Per brief: extra ideas live here only. Do not change House Rules tone.
     (citations) is gone rather than passing a receipt-less verdict off silently.
     A genuinely malformed verdict keeps the original error. 15 tests.
 
+## V2.1 — Fix the Court (Sept 17–18 2026)
+
+Bug batch against the V2 spec (Testing & Results + V3 Scoping DRAFT). Branch
+`v2.1-fix-the-court`. No V3 features (open call, allowlist growth, live checks, flare).
+
+**Tier 1**
+- **B7** Tolkien Gateway API lives at `/w/api.php` (not `/api.php`). `api_path` on
+  the LotR source; `mediawiki_api_url()` helper; startup `log_allowlisted_source_health`
+  pings every allowlisted source (non-fatal).
+- **B12** Fandom TextExtracts often empty → parse fallback returned tab chrome
+  ("Introduction • Biography…") stamped verified. Strip nav/disambiguation lead-in;
+  reject boilerplate; `verified=true` only on body prose (title already matched for
+  MediaWiki).
+- **B11** Guardrail **caps** with `min(confidence, 5)` on unavailable / zero verified
+  receipts — never assigns a flat mid score. Well-sourced receipts keep high confidence.
+  Prompt + pack text say the same.
+
+**Tier 2**
+- **B1** Compact ruling embed: matchup title · Verdict (name + confidence) · clipped
+  steelmans · collapsed concessions/unknowns · citations. Prompt asks for 3–5 sentence
+  rulings.
+- **B2 / B2a** Title always names the fight; winner field resolves character names
+  (not bare "B" / "⚔ —").
+- **B8** Retrieval gaps no longer set `verdict["voided"]`. Footer says
+  `re-judge when receipts restore` instead of `voided · queued for re-judge` on a
+  valid House Rule 3 ruling.
+
+**Tier 3**
+- **B3 / B9 / B10 (shape A, Matt-locked)** `/fight opponent champion_a champion_b
+  [context] [instant]`. Dropped slash fields `matchup` / `side` / `fighter_a` /
+  `fighter_b`. Card echoes **Matchup: A vs B**. Helper still accepts legacy aliases
+  for unit tests.
+- **B4** Open-ended / missing-field error copy rewritten around `champion_a` /
+  `champion_b`.
+- **B5** README aligned: missing Portal Message Content intent **crashes** with
+  `PrivilegedIntentsRequired` before `on_ready`; protective `message_content=True`
+  kept.
+
+**Test harness**
+- **T1** `/config allow_self_fight` (bool, default off, Manage Server). Challenger
+  may Accept own card when on. No fake users.
+- **T2** Friend / alt-account side B = human gate only (not automated).
+
+**Parked:** B13 (`argument_quality`), B14 (double-launch watch).
+
+
+### V2.1 follow-up — Prime review nits (parked)
+
+- **Winner resolver prefers `fight.side_*` over model `winner` string.** When
+  `winner_side` is set, the compact embed shows `fight.side_a` / `side_b` even if
+  the model `winner` string has a typo. Known V2.1 behavior — do not flip without
+  a product call; typos in the model name still "show" the card's champion labels.
+- **Full steelmans for power users.** Thread jump link already carries the detail
+  drop; optional later "full ruling" jump / expand is out of scope for this nit
+  pass (behavior unchanged).

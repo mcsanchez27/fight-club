@@ -199,3 +199,24 @@ def is_stale(retrieved_at: str | None, cfg: dict[str, Any] | None = None) -> boo
         dt = dt.replace(tzinfo=timezone.utc)
     age = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
     return age > timedelta(days=stale_days(cfg))
+
+
+def mediawiki_api_url(base_url: str, api_path: str | None = None) -> str:
+    """Build MediaWiki API URL; default ``/api.php``, Tolkien Gateway uses ``/w/api.php``."""
+    base = (base_url or "").rstrip("/")
+    path = (api_path or "/api.php").strip() or "/api.php"
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path
+
+
+def iter_allowlisted_sources(cfg: dict[str, Any] | None = None) -> list[tuple[str, dict[str, Any]]]:
+    """Return ``(franchise_key, source_dict)`` for every allowlisted source."""
+    cfg = cfg or load_sources_config()
+    out: list[tuple[str, dict[str, Any]]] = []
+    for fk, meta in (cfg.get("franchises") or {}).items():
+        for src in meta.get("sources") or []:
+            if isinstance(src, dict) and src.get("base_url"):
+                out.append((str(fk), src))
+    return out
+

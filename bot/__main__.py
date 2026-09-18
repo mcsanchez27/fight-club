@@ -23,7 +23,9 @@ def main() -> int:
 
     intents = discord.Intents.default()
     # Privileged Message Content — required for fight-thread transcripts (amendment 13 / C7).
-    # Also enable Message Content Intent in the Discord Developer Portal.
+    # Portal toggle MUST be on: if code requests this intent but the Developer Portal
+    # has it disabled, discord.py raises PrivilegedIntentsRequired and the process
+    # exits before on_ready (so the warning below never runs). Keep the hard require.
     intents.message_content = True
     bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -37,6 +39,34 @@ def main() -> int:
                 "(Bot → Privileged Gateway Intents) and keep "
                 "Intents.message_content = True in bot/__main__.py. "
                 "Without it, thread transcript reading will fail.",
+                file=sys.stderr,
+            )
+        # B7: non-fatal ping of every allowlisted source (debounced in retrieval).
+        try:
+            from bot.retrieval import log_allowlisted_source_health
+
+            await asyncio.to_thread(log_allowlisted_source_health)
+        except Exception as e:
+            print(
+                f"[sources] health check skipped: {type(e).__name__}",
+                file=sys.stderr,
+            )
+        # Loud warn when allow_self_fight is on anywhere (test harness — do not rot in prod).
+        try:
+            from bot.config import allow_self_fight_enabled_somewhere
+            from bot.db import get_db
+
+            if allow_self_fight_enabled_somewhere(get_db()):
+                print(
+                    "WARNING: allow_self_fight is ENABLED (env and/or guild_config). "
+                    "Challengers can Accept their own cards — test harness only. "
+                    "Turn off via `/config allow_self_fight false` and unset "
+                    "FIGHT_ALLOW_SELF_FIGHT before treating this as production.",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(
+                f"[config] allow_self_fight check skipped: {type(e).__name__}",
                 file=sys.stderr,
             )
         try:

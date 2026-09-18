@@ -55,6 +55,7 @@ def test_defaults_match_section_7(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert resolved["thread_archive_delay_hours"] == 24.0
     assert resolved["transcript_max_tokens"] == 20_000
     assert resolved["sweep_interval_minutes"] == 2
+    assert resolved["allow_self_fight"] is False
     db.close()
 
 
@@ -246,12 +247,10 @@ def test_fight_rejects_outside_allowed_channels(
             cog,
             interaction,
             opponent=None,
-            matchup=None,
+            champion_a=None,
+            champion_b=None,
             context=None,
-            side=None,
             instant=False,
-            fighter_a=None,
-            fighter_b=None,
             franchise=None,
             exhibits=None,
         )

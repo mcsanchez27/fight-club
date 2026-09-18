@@ -156,10 +156,9 @@ def test_ruling_drop_embed_content_and_thin_banner() -> None:
     assert "Steelman B" in names
     assert "Concessions" in names
     assert "Exhibit ledger" in names
-    assert "Winner" in names
-    assert "Confidence" in names
+    assert "Verdict" in names  # V2.1: winner + confidence on one line
     assert "Citations" in names
-    assert "Goku" in embed.fields[names.index("Winner")].value
+    assert "Goku" in embed.fields[names.index("Verdict")].value
 
 
 def test_nullable_scores_do_not_fail_validation() -> None:

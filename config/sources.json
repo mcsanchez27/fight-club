@@ -96,7 +96,8 @@
         {
           "name": "Tolkien Gateway",
           "base_url": "https://tolkiengateway.net",
-          "api": "mediawiki"
+          "api": "mediawiki",
+          "api_path": "/w/api.php"
         }
       ]
     },

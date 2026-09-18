@@ -135,8 +135,20 @@ def pack_db_receipts_for_prompt(
     if st in _REFRESH_STATUSES or st == "unavailable":
         lines.append(
             "Retrieval unavailable or empty. Put missing canon in unknowns "
-            "(legal plea). Do NOT invent URLs. Confidence will be capped at 5/10."
+            "(legal plea). Do NOT invent URLs. Confidence is capped at 5/10 "
+            "(cap only — do not flatten every lean to the same mid score)."
         )
+    else:
+        verified_n = sum(1 for r in receipts if r.get("verified"))
+        if verified_n:
+            lines.append(
+                f"{verified_n} verified receipt(s). Confidence may exceed 5/10 "
+                "when the lean is well-supported."
+            )
+        else:
+            lines.append(
+                "No verified receipts in pack. Confidence is capped at 5/10."
+            )
     if receipts:
         lines.append(
             "RECEIPTS (autonomous fetch — cite these for load-bearing ruling/concessions):"

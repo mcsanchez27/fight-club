@@ -41,6 +41,7 @@ from bot.fights import (
     MISSING_FIGHT_PROMPT,
     RULED_STATUS,
     accept_fight,
+    actor_may_accept,
     actor_advocate_side,
     apply_balance_to_fight,
     archive_due,
@@ -521,15 +522,16 @@ class ChallengeCardView(discord.ui.View):
         if fight is None:
             await interaction.response.send_message("Fight not found.", ephemeral=True)
             return
+        # Gate before progress edit / modal so allow_self_fight (incl. opponent==me)
+        # is honored and unauthorized clicks don't strip the card.
+        if not actor_may_accept(fight, interaction.user.id, get_db()):
+            await interaction.response.send_message(
+                "Only the challenged user can Accept.",
+                ephemeral=True,
+            )
+            return
         # Open-ended with missing side_b → modal for champion (lead lock A1).
         if fight.get("open_ended") and not sides_complete(fight):
-            holder = button_holder_id(fight)
-            if holder is not None and int(interaction.user.id) != int(holder):
-                await interaction.response.send_message(
-                    "Only the challenged user can Accept.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.send_modal(OpenEndedAcceptModal(fight_id))
             return
         await _complete_accept(interaction, fight_id, actor_id=interaction.user.id)
@@ -1086,13 +1088,11 @@ class FightCog(commands.Cog):
 
     @app_commands.command(name="fight", description="Challenge a user or judge an instant matchup")
     @app_commands.describe(
-        opponent="Who you are challenging (proposed card path)",
-        matchup='Matchup label, e.g. "Aragorn vs Goku"',
+        opponent="Who you are challenging (omit for instant)",
+        champion_a="Your champion (Side A)",
+        champion_b="Their champion (Side B); omit for open-ended",
         context="Optional arena, rules, or constraints",
-        side="Your side: A, B, or a fighter name from the matchup",
         instant="If true, skip the card and rule immediately (no thread)",
-        fighter_a="Instant: first fighter (or use matchup)",
-        fighter_b="Instant: second fighter (or use matchup)",
         franchise="Optional franchise key/label (instant path)",
         exhibits="Optional user-pasted evidence (instant path)",
     )
@@ -1100,12 +1100,10 @@ class FightCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         opponent: discord.Member | None = None,
-        matchup: str | None = None,
+        champion_a: str | None = None,
+        champion_b: str | None = None,
         context: str | None = None,
-        side: str | None = None,
         instant: bool = False,
-        fighter_a: str | None = None,
-        fighter_b: str | None = None,
         franchise: str | None = None,
         exhibits: str | None = None,
     ) -> None:
@@ -1120,12 +1118,10 @@ class FightCog(commands.Cog):
             return
         plan = validate_fight_fields(
             opponent_id=opponent.id if opponent is not None else None,
-            matchup=matchup,
             context=context,
-            side=side,
             instant=instant,
-            fighter_a=fighter_a,
-            fighter_b=fighter_b,
+            champion_a=champion_a,
+            champion_b=champion_b,
         )
         if plan.kind == "prompt":
             await interaction.response.send_message(
@@ -1139,11 +1135,16 @@ class FightCog(commands.Cog):
             if not plan.open_ended:
                 assert plan.side_b
             if opponent.id == interaction.user.id:
-                await interaction.response.send_message(
-                    "You cannot challenge yourself.",
-                    ephemeral=True,
+                allow_self = bool(
+                    get_guild_config(db, interaction.guild_id, "allow_self_fight")
                 )
-                return
+                if not allow_self:
+                    await interaction.response.send_message(
+                        "You cannot challenge yourself. "
+                        "(Admins: `/config allow_self_fight true` for solo thread tests.)",
+                        ephemeral=True,
+                    )
+                    return
             fight = create_proposed_fight(
                 get_db(),
                 guild_id=interaction.guild_id,
@@ -1219,8 +1220,14 @@ class FightCog(commands.Cog):
             context=plan.context,
             now=utc_now(),
         )
+        if not str(verdict.get("matchup") or "").strip():
+            verdict["matchup"] = f"{fa} vs {fb}"
+        ws = verdict.get("winner_side")
+        wraw = str(verdict.get("winner") or "").strip()
+        if ws in {"a", "b"} and (not wraw or wraw.lower() in {"a", "b"}):
+            verdict["winner"] = fa if ws == "a" else fb
         msg = await interaction.followup.send(
-            embed=verdict_embed(verdict), view=ChallengeView()
+            embed=verdict_embed(verdict, fight=fight), view=ChallengeView()
         )
         out = finalize_instant_ruling(
             get_db(),

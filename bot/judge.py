@@ -254,7 +254,7 @@ VERDICT_INPUT_SCHEMA: dict[str, Any] = {
         },
         "confidence": {
             "type": "number",
-            "description": "Confidence 0-10, one decimal (capped at 5 if retrieval unavailable)",
+            "description": "Confidence 0-10, one decimal. Cap at 5 only when retrieval is unavailable or receipts are unverified; well-sourced leans may score above 5",
         },
         "argument_quality": {
             "type": ["number", "null"],
@@ -450,7 +450,10 @@ def _map_winner_fields(out: dict[str, Any]) -> None:
         side_l = str(side).strip().lower()
         if side_l in {"a", "b"}:
             out["winner_side"] = side_l
-            if not winner:
+            # Prefer a real name; bare A/B only as a temporary placeholder (B2a).
+            if winner and str(winner).strip().lower() not in {"a", "b"}:
+                out["winner"] = str(winner).strip()
+            else:
                 out["winner"] = side_l.upper()
             return
     if winner is not None and str(winner).strip():
@@ -533,16 +536,29 @@ def validate_verdict(data: dict[str, Any]) -> dict[str, Any]:
 def apply_retrieval_guardrails(
     verdict: dict[str, Any], result: RetrievalResult
 ) -> dict[str, Any]:
-    """Cap confidence, merge packed receipts/exhibits, set retrieval metadata."""
+    """Cap confidence on thin/unavailable evidence; merge receipts; metadata.
+
+    Cap means ``min(model_confidence, cap)`` — never assign a flat mid score.
+    Well-sourced fights (verified body-text receipts) keep the model's lean.
+    Does **not** set ``voided`` (that flag is for fight/ruling lifecycle +
+    rejudge queue, not retrieval gaps — House Rule 3 still rules).
+    """
     out = dict(verdict)
     out["retrieval_status"] = result.status
     out["franchise"] = result.franchise
-    out["voided"] = bool(result.retrieval_unavailable)
+    # Do not conflate retrieval gaps with fight voided (B8).
+    out.pop("voided", None)
 
-    if result.retrieval_unavailable:
+    verified_receipts = [p for p in result.receipts if p.verified]
+    thin_evidence = result.retrieval_unavailable or not verified_receipts
+    if thin_evidence:
+        # Cap only — preserve values already at/below the ceiling (B11).
         out["confidence"] = min(float(out["confidence"]), UNVERIFIED_CONFIDENCE_CAP)
         unknowns = list(out.get("unknowns") or [])
-        plea = "unverified: retrieval unavailable"
+        if result.retrieval_unavailable:
+            plea = "unverified: retrieval unavailable"
+        else:
+            plea = "unverified: no verified body-text receipts"
         if plea not in unknowns:
             unknowns.append(plea)
         out["unknowns"] = unknowns
@@ -1028,6 +1044,13 @@ def judge(
     guarded = apply_retrieval_guardrails(verdict, retrieval_result)
     # apply_retrieval_guardrails copies the dict but may drop unknown keys — reattach.
     guarded["_usage"] = usage
+    # B2 / B2a: always name the fight and the winner (not "⚔ —" / bare "B").
+    if not str(guarded.get("matchup") or "").strip():
+        guarded["matchup"] = f"{fighter_a} vs {fighter_b}"
+    ws = guarded.get("winner_side")
+    wraw = str(guarded.get("winner") or "").strip()
+    if ws in {"a", "b"} and (not wraw or wraw.lower() in {"a", "b"}):
+        guarded["winner"] = fighter_a if ws == "a" else fighter_b
     return guarded
 
 

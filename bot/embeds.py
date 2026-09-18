@@ -38,15 +38,86 @@ def _format_citation(c: Any) -> str:
     return " · ".join(p for p in parts if p)
 
 
-def verdict_embed(v: dict[str, Any]) -> discord.Embed:
-    """Build a Discord embed from a judge verdict JSON dict (steelman-first fields)."""
-    conf = float(v.get("confidence", 0))
-    status = v.get("retrieval_status")
-    unavailable = status in {"unavailable", "unlisted", "disabled"} or bool(
-        v.get("voided")
-    )
+def _resolve_matchup(v: dict[str, Any], fight: dict[str, Any] | None = None) -> str:
+    matchup = str(v.get("matchup") or "").strip()
+    if matchup and matchup not in {"—", "-", "Matchup"}:
+        return matchup
+    if fight:
+        a = str(fight.get("side_a") or "").strip()
+        b = str(fight.get("side_b") or "").strip()
+        if a or b:
+            return f"{a or '?'} vs {b or '?'}"
+    return "Matchup"
 
-    # color leans green high / amber mid / red low confidence
+
+def _resolve_winner_name(v: dict[str, Any], fight: dict[str, Any] | None = None) -> str:
+    """Prefer character name over bare A/B (B2a)."""
+    if fight and v.get("winner_side") in {"a", "b"}:
+        named = fight.get(f"side_{v['winner_side']}")
+        if named and str(named).strip():
+            return str(named).strip()
+    w = str(v.get("winner") or "").strip()
+    if w and w.lower() not in {"a", "b"}:
+        return w
+    if v.get("winner_side") in {"a", "b"}:
+        # Last resort: still better than "?" when sides unknown.
+        return w.upper() if w.lower() in {"a", "b"} else str(v["winner_side"]).upper()
+    return w or "?"
+
+
+def _collapse_bullets(items: list[Any], *, limit: int = 3, max_chars: int = 280) -> str:
+    """Trim steelman/concession/unknown lists so one embed fits without '…' spam."""
+    cleaned = [str(i).strip() for i in (items or []) if str(i).strip()]
+    if not cleaned:
+        return "—"
+    trimmed = cleaned[:limit]
+    text = _join_list(trimmed)
+    if len(cleaned) > limit:
+        text += f"\n• (+{len(cleaned) - limit} more)"
+    return _clip(text, max_chars)
+
+
+def _ruling_description(v: dict[str, Any], *, unavailable: bool, thin: bool) -> str:
+    """Compact body: optional banners + 3–5 sentence ruling (B1)."""
+    ruling = str(v.get("ruling") or "").strip()
+    # Prefer a short ruling; clip hard so steelmans don't blow the embed.
+    body = _clip(ruling, 900)
+    parts: list[str] = []
+    if thin or v.get("thin_record"):
+        banner = str(v.get("thin_record_banner") or THIN_RECORD_BANNER)
+        parts.append(f"**{banner}**")
+    if unavailable:
+        parts.append("**unverified: retrieval unavailable**")
+    if body and body != "—":
+        parts.append(body)
+    return _clip("\n".join(parts) if parts else "—", 1200)
+
+
+def _receipt_footer_bits(v: dict[str, Any], *, status: Any, cites: list[Any]) -> list[str]:
+    """Footer labels — never say 'voided' for a valid House Rule 3 ruling (B8)."""
+    bits: list[str] = []
+    if status:
+        bits.append(f"receipts: {status}")
+    # Retrieval gaps queue a re-judge; that is not a voided fight.
+    if status == "unavailable" or (
+        bool(v.get("voided")) and status in {"unavailable", "unlisted", "disabled"}
+    ):
+        bits.append("re-judge when receipts restore")
+    elif v.get("voided"):
+        # True lifecycle void (rare on an embed path).
+        bits.append("voided")
+    verified_n = sum(1 for c in cites if isinstance(c, dict) and c.get("verified"))
+    unverified_n = len(cites) - verified_n
+    bits.append(f"✓{verified_n} ✗{unverified_n}")
+    return bits
+
+
+def verdict_embed(v: dict[str, Any], *, fight: dict[str, Any] | None = None) -> discord.Embed:
+    """Build a Discord embed from a judge verdict JSON dict (compact V2.1 shape)."""
+    conf = float(v.get("confidence", 0) or 0)
+    status = v.get("retrieval_status")
+    unavailable = status in {"unavailable", "unlisted", "disabled"}
+
     if unavailable:
         color = discord.Color.dark_grey()
     elif conf >= 7:
@@ -56,36 +127,44 @@ def verdict_embed(v: dict[str, Any]) -> discord.Embed:
     else:
         color = discord.Color.orange()
 
-    description = _clip(str(v.get("ruling", "")), 3500)
-    if unavailable:
-        description = (
-            "**unverified: retrieval unavailable**\n"
-            + (description if description != "—" else "")
-        )
+    matchup = _resolve_matchup(v, fight)
+    winner = _resolve_winner_name(v, fight)
 
     embed = discord.Embed(
-        title=f"⚔ {_clip(str(v.get('matchup', 'Matchup')), 250)}",
-        description=_clip(description, 4000),
+        title=f"⚔ {_clip(matchup, 250)}",
+        description=_ruling_description(v, unavailable=unavailable, thin=False),
         color=color,
     )
-    embed.add_field(name="Steelman A", value=_clip(str(v.get("steelman_a", ""))), inline=False)
-    embed.add_field(name="Steelman B", value=_clip(str(v.get("steelman_b", ""))), inline=False)
+    # Winner + confidence on one conceptual line (two inline fields).
+    embed.add_field(
+        name="Verdict",
+        value=_clip(f"**{winner}** · {conf}/10", 256),
+        inline=False,
+    )
+    # Collapsed steelmans / concessions / unknowns (B1).
+    embed.add_field(
+        name="Steelman A",
+        value=_clip(str(v.get("steelman_a") or ""), 320),
+        inline=False,
+    )
+    embed.add_field(
+        name="Steelman B",
+        value=_clip(str(v.get("steelman_b") or ""), 320),
+        inline=False,
+    )
     embed.add_field(
         name="Concessions",
-        value=_clip(_join_list(list(v.get("concessions") or []))),
+        value=_collapse_bullets(list(v.get("concessions") or []), limit=3, max_chars=280),
         inline=False,
     )
     embed.add_field(
         name="Unknowns",
-        value=_clip(_join_list(list(v.get("unknowns") or []))),
+        value=_collapse_bullets(list(v.get("unknowns") or []), limit=3, max_chars=280),
         inline=False,
     )
-    embed.add_field(name="Winner", value=_clip(str(v.get("winner", "?")), 256), inline=True)
-    embed.add_field(name="Confidence", value=f"{conf}/10", inline=True)
-    embed.add_field(name="​", value="​", inline=True)
 
     cites = v.get("citations") or []
-    cite_lines = [_format_citation(c) for c in cites]
+    cite_lines = [_format_citation(c) for c in cites[:5]]
     embed.add_field(
         name="Citations",
         value=_clip(_join_list(cite_lines)),
@@ -93,15 +172,7 @@ def verdict_embed(v: dict[str, Any]) -> discord.Embed:
     )
 
     footer_bits = ["Fight Club Court · rulings revisable on new evidence"]
-    if status:
-        footer_bits.append(f"receipts: {status}")
-    if v.get("voided"):
-        footer_bits.append("voided · queued for re-judge")
-    verified_n = sum(
-        1 for c in cites if isinstance(c, dict) and c.get("verified")
-    )
-    unverified_n = len(cites) - verified_n
-    footer_bits.append(f"✓{verified_n} ✗{unverified_n}")
+    footer_bits.extend(_receipt_footer_bits(v, status=status, cites=cites))
     embed.set_footer(text=" · ".join(footer_bits))
     return embed
 
@@ -140,7 +211,10 @@ def balance_warning_field(fight: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
-    """Challenge card for a ``proposed`` fight (Accept / Decline / Counter)."""
+    """Challenge card for a ``proposed`` fight (Accept / Decline / Counter).
+
+    Always echoes the parsed matchup (champion_a vs champion_b) before Accept.
+    """
     side_a = str(fight.get("side_a") or "?")
     side_b = str(fight.get("side_b") or "?")
     open_ended = bool(fight.get("open_ended")) and not (
@@ -149,11 +223,15 @@ def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
     if open_ended:
         title = f"⚔ Open challenge: {side_a} vs ?"
         description = (
+            f"**Matchup:** {side_a} vs ?\n"
             "Open-ended — Accept and name your champion. Decline to void. Counter to rewrite."
         )
     else:
         title = f"⚔ Challenge: {side_a} vs {side_b}"
-        description = "Accept to open arguments. Decline to void. Counter to rewrite terms."
+        description = (
+            f"**Matchup:** {side_a} vs {side_b}\n"
+            "Accept to open arguments. Decline to void. Counter to rewrite terms."
+        )
     embed = discord.Embed(
         title=_clip(title, 250),
         description=description,
@@ -190,7 +268,6 @@ def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
             value=f"A:{ca} · B:{cb}",
             inline=True,
         )
-    # Balance warning chrome (referee's read; not a ruling).
     warn = balance_warning_field(fight)
     if warn is not None:
         embed.add_field(name=warn[0], value=_clip(warn[1]), inline=False)
@@ -205,7 +282,6 @@ def challenge_card_embed(fight: dict[str, Any]) -> discord.Embed:
         footer += " · open-ended"
     embed.set_footer(text=footer)
     return embed
-
 
 
 THIN_RECORD_BANNER = "Thin record — ruled on available argument."
@@ -241,18 +317,10 @@ def ruling_drop_embed(
     title: str | None = None,
     diff_line: str | None = None,
 ) -> discord.Embed:
-    """Full thread ruling drop (item 8): steelmans → ledger → ruling → winner.
-
-    Field lengths clipped like V1 ``verdict_embed``. Optional thin-record banner
-    (Amendment 7) prepended to the description. Optional flare line (item 9)
-    appended after citations. Item 10 reconsideration may pass ``title`` and
-    ``diff_line``.
-    """
+    """Full thread ruling drop — compact V2.1 shape (B1/B2/B2a)."""
     conf = float(v.get("confidence", 0) or 0)
     status = v.get("retrieval_status")
-    unavailable = status in {"unavailable", "unlisted", "disabled"} or bool(
-        v.get("voided")
-    )
+    unavailable = status in {"unavailable", "unlisted", "disabled"}
     if unavailable:
         color = discord.Color.dark_grey()
     elif conf >= 7:
@@ -262,41 +330,35 @@ def ruling_drop_embed(
     else:
         color = discord.Color.orange()
 
-    matchup = v.get("matchup")
-    if not matchup and fight:
-        matchup = f"{fight.get('side_a') or '?'} vs {fight.get('side_b') or '?'}"
-    matchup = matchup or "Matchup"
+    matchup = _resolve_matchup(v, fight)
+    winner = _resolve_winner_name(v, fight)
 
-    ruling_text = str(v.get("ruling", "") or "")
-    description = _clip(ruling_text, 3500)
-    banner = None
-    if thin_record or v.get("thin_record"):
-        banner = str(v.get("thin_record_banner") or THIN_RECORD_BANNER)
-        description = f"**{banner}**\n" + (description if description != "—" else "")
-    if unavailable:
-        description = (
-            "**unverified: retrieval unavailable**\n"
-            + (description if description != "—" else "")
-        )
-
-    embed_title = title if title else f"⚖ {_clip(str(matchup), 250)}"
+    embed_title = title if title else f"⚖ {_clip(matchup, 250)}"
     embed = discord.Embed(
         title=_clip(str(embed_title), 250),
-        description=_clip(description, 4000),
+        description=_ruling_description(
+            v, unavailable=unavailable, thin=thin_record or bool(v.get("thin_record"))
+        ),
         color=color,
     )
     diff = diff_line or v.get("reconsideration_diff")
     if diff:
         embed.add_field(name="Diff", value=_clip(str(diff), 256), inline=False)
+
     embed.add_field(
-        name="Steelman A", value=_clip(str(v.get("steelman_a", ""))), inline=False
+        name="Verdict",
+        value=_clip(f"**{winner}** · {conf}/10", 256),
+        inline=False,
     )
     embed.add_field(
-        name="Steelman B", value=_clip(str(v.get("steelman_b", ""))), inline=False
+        name="Steelman A", value=_clip(str(v.get("steelman_a", "")), 320), inline=False
+    )
+    embed.add_field(
+        name="Steelman B", value=_clip(str(v.get("steelman_b", "")), 320), inline=False
     )
     embed.add_field(
         name="Concessions",
-        value=_clip(_join_list(list(v.get("concessions") or []))),
+        value=_collapse_bullets(list(v.get("concessions") or []), limit=3, max_chars=280),
         inline=False,
     )
 
@@ -305,26 +367,12 @@ def ruling_drop_embed(
         ledger = v.get("exhibit_ledger")
     embed.add_field(
         name="Exhibit ledger",
-        value=_clip(_format_exhibit_ledger_field(ledger)),
+        value=_clip(_format_exhibit_ledger_field(ledger), 400),
         inline=False,
     )
 
-    winner = None
-    if fight and v.get("winner_side") in {"a", "b"}:
-        winner = fight.get(f"side_{v['winner_side']}")
-    if not winner:
-        w = v.get("winner")
-        # Ignore bare V1 side letters when fight sides are known.
-        if w and not (fight and str(w).strip().lower() in {"a", "b"}):
-            winner = w
-    if not winner:
-        winner = v.get("winner") or v.get("winner_side") or "?"
-    embed.add_field(name="Winner", value=_clip(str(winner), 256), inline=True)
-    embed.add_field(name="Confidence", value=f"{conf}/10", inline=True)
-    embed.add_field(name="\u200b", value="\u200b", inline=True)
-
     cites = v.get("citations") or []
-    cite_lines = [_format_citation(c) for c in cites]
+    cite_lines = [_format_citation(c) for c in cites[:5]]
     embed.add_field(
         name="Citations",
         value=_clip(_join_list(cite_lines)),
@@ -339,12 +387,8 @@ def ruling_drop_embed(
         footer_bits = ["Fight Club Court · reconsideration"]
     else:
         footer_bits = ["Fight Club Court · initial ruling"]
-    if status:
-        footer_bits.append(f"receipts: {status}")
-    if banner:
+    footer_bits.extend(_receipt_footer_bits(v, status=status, cites=cites))
+    if thin_record or v.get("thin_record"):
         footer_bits.append("thin record")
-    verified_n = sum(1 for c in cites if isinstance(c, dict) and c.get("verified"))
-    unverified_n = len(cites) - verified_n
-    footer_bits.append(f"✓{verified_n} ✗{unverified_n}")
     embed.set_footer(text=" · ".join(footer_bits))
     return embed
